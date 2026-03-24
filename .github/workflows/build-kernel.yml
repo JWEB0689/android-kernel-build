@@ -79,9 +79,12 @@ jobs:
         
     - name: Setup Toolchain (ZyC Clang)
       run: |
-        mkdir -p $GITHUB_WORKSPACE/toolchains
-        cd $GITHUB_WORKSPACE/toolchains
-        git clone --depth=1 https://gitlab.com/zyc-compiler/zyc-clang.git
+        mkdir -p $GITHUB_WORKSPACE/toolchains/zyc-clang
+        cd $GITHUB_WORKSPACE/toolchains/zyc-clang
+        DOWNLOAD_URL=$(curl -sL https://api.github.com/repos/ZyCromerZ/Clang/releases/latest | jq -r '.assets[0].browser_download_url')
+        wget -qO zyc.tar.gz "$DOWNLOAD_URL"
+        tar -xf zyc.tar.gz -C . --strip-components=1 || tar -xf zyc.tar.gz -C .
+        rm zyc.tar.gz
         
     - name: Clone Kernel Source
       run: |

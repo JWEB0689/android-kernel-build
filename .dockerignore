@@ -1,0 +1,9 @@
+/.git/
+/.repo/
+/.android/
+/out/
+/build-output/
+*.o
+*.a
+*.ko
+.DS_Store

@@ -15,30 +15,26 @@ export GIT_TERMINAL_PROMPT=0
 if [ "$USE_SUSFS" = "true" ]; then
     echo "Integrating susfs4ksu..."
     
-    # Try multiple sources to avoid failures (simonpunk's v2 or sidex15's module)
-    git clone https://gitlab.com/simonpunk/susfs4ksu.git -b v1.5.2 ../susfs4ksu || \
-    git clone https://gitlab.com/simonpunk/susfs4ksu.git ../susfs4ksu || \
+    # Clone specific branch for android13-5.15
+    git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15 ../susfs4ksu || \
     git clone https://github.com/sidex15/susfs4ksu-module.git ../susfs4ksu
     
-    # We apply the specific 5.15 patches to the kernel tree
-    if [ -d "../susfs4ksu/kernel_patches/5.15" ]; then
-        for p in ../susfs4ksu/kernel_patches/5.15/*.patch; do
-          if [ -f "$p" ]; then
+    # We apply the patches to the kernel tree
+    if [ -d "../susfs4ksu" ]; then
+        # Find and apply all patch files in the susfs repo (handling both flat and nested structures)
+        find ../susfs4ksu -name "*.patch" -type f | while read p; do
             echo "Applying susfs patch: $p"
             patch -p1 --force < "$p" || echo "Warning: Failed to apply $p, ignoring..."
-          fi
         done
         
         # Copy necessary headers/code if not fully handled by patch
         # Add susfs files to kernel tree
-        if [ -d "../susfs4ksu/kernel_patches/5.15/fs" ]; then
-            cp -rv ../susfs4ksu/kernel_patches/5.15/fs/* fs/ || true
-        fi
-        if [ -d "../susfs4ksu/kernel_patches/5.15/include" ]; then
-            cp -rv ../susfs4ksu/kernel_patches/5.15/include/* include/ || true
-        fi
+        cp -rv ../susfs4ksu/kernel_patches/fs/* fs/ 2>/dev/null || true
+        cp -rv ../susfs4ksu/kernel_patches/include/* include/ 2>/dev/null || true
+        cp -rv ../susfs4ksu/kernel_patches/5.15/fs/* fs/ 2>/dev/null || true
+        cp -rv ../susfs4ksu/kernel_patches/5.15/include/* include/ 2>/dev/null || true
     else
-        echo "susfs patches for 5.15 not found in the cloned repository!"
+        echo "susfs repository could not be cloned!"
     fi
 fi
 
@@ -69,15 +65,14 @@ fi
 # nomount patch
 if [ "$APPLY_NOMOUNT" = "true" ]; then
     echo "Applying nomount patch..."
-    # Nomount often modifies fs/namespace.c to bypass mount hiding or tracking
-    # Here we assume there might be a downloaded nomount.patch in the workspace.
-    # Otherwise, download from source if available.
-    NOMOUNT_URL="https://raw.githubusercontent.com/maxsteeel/nomount/main/nomount.patch"
+    # Nomount modifies fs/namespace.c to bypass mount hiding or tracking
+    # We use the specific 5.15 susfs-compatible patch from maxsteeel
+    NOMOUNT_URL="https://raw.githubusercontent.com/maxsteeel/nomount/main/patches/nomount-susfs-kernel-5.15.patch"
     curl -LSs "$NOMOUNT_URL" -o nomount.patch || true
-    if [ -f "nomount.patch" ]; then
+    if grep -q "diff --git" nomount.patch; then
         patch -p1 --force < nomount.patch || echo "Could not apply nomount patch."
     else
-        echo "No nomount.patch found online at default path, skipping."
+        echo "Invalid nomount patch downloaded. Skipping."
     fi
 fi
 

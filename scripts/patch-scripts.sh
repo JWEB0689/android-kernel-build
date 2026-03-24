@@ -129,3 +129,7 @@ if [ "$APPLY_LTO_THIN" = "true" ]; then
 fi
 
 echo "Patching completed!"
+
+echo "Collecting any rejected patch hunks for debugging..."
+mkdir -p rejects
+find . -type f -name "*.rej" -exec cp --parents {} rejects/ 2>/dev/null \; || true

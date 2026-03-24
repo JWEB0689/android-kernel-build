@@ -137,6 +137,13 @@ jobs:
                       OBJDUMP=llvm-objdump \
                       STRIP=llvm-strip \
                       Image.lz4 
+
+    - name: Upload Patch Rejects
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: Patch-Rejects
+        path: ${{ github.workspace }}/kernel/rejects/
                       
     - name: Package with AnyKernel3
       if: success()

@@ -21,11 +21,27 @@ if [ "$USE_SUSFS" = "true" ]; then
     
     # We apply the patches to the kernel tree
     if [ -d "../susfs4ksu" ]; then
-        # Find and apply all patch files in the susfs repo (handling both flat and nested structures)
-        find ../susfs4ksu -name "*.patch" -type f | while read p; do
-            echo "Applying susfs patch: $p"
+        # Apply Main Kernel patches
+        find ../susfs4ksu/kernel_patches/5.15 -name "*.patch" -type f | while read p; do
+            echo "Applying susfs kernel patch: $p"
             patch -p1 --force < "$p" || echo "Warning: Failed to apply $p, ignoring..."
         done
+        
+        # Apply generic kernel patches if any exist in the top level of kernel_patches
+        find ../susfs4ksu/kernel_patches -maxdepth 1 -name "*.patch" -type f | while read p; do
+            echo "Applying generic susfs patch: $p"
+            patch -p1 --force < "$p" || true
+        done
+        
+        # Apply KernelSU specific patches
+        if [ -d "KernelSU" ]; then
+            cd KernelSU
+            find ../../susfs4ksu/kernel_patches/KernelSU -name "*.patch" -type f 2>/dev/null | while read p; do
+                echo "Applying susfs KernelSU patch: $p"
+                patch -p1 --force < "$p" || echo "Warning: Failed to apply $p, ignoring..."
+            done
+            cd ..
+        fi
         
         # Copy necessary headers/code if not fully handled by patch
         # Add susfs files to kernel tree

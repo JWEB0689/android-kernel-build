@@ -67,7 +67,7 @@ on:
 jobs:
   build:
     name: Build Kernel
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
     - name: Checkout Builder Repo
       uses: actions/checkout@v4
@@ -75,17 +75,12 @@ jobs:
     - name: Setup Environment
       run: |
         sudo apt-get update
-        sudo apt-get install -y git ccache automake flex lzop bison gperf build-essential zip curl zlib1g-dev g++-multilib libxml2-utils bzip2 libbz2-dev libghc-bzlib-dev squashfs-tools pngcrush schedtool dpkg-dev liblz4-tool make optipng maven libssl-dev pwgen libswitch-perl policycoreutils minicom libxml-sax-base-perl libxml-simple-perl bc libc6-dev-i386 libncurses5-dev x11proto-core-dev libx11-dev lib32z-dev libgl1-mesa-dev xsltproc unzip device-tree-compiler python3 python-is-python3
+        sudo apt-get install -y git ccache automake flex lzop bison gperf build-essential zip curl zlib1g-dev g++-multilib libxml2-utils bzip2 libbz2-dev libghc-bzlib-dev squashfs-tools pngcrush schedtool dpkg-dev liblz4-tool make optipng maven libssl-dev pwgen libswitch-perl policycoreutils minicom libxml-sax-base-perl libxml-simple-perl bc libc6-dev-i386 lib32ncurses5-dev libncurses5-dev x11proto-core-dev libx11-dev lib32z-dev libgl1-mesa-dev xsltproc unzip device-tree-compiler python2 python3 python-is-python3 gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
         
-    - name: Setup Toolchains (GCC & ZyC Clang)
+    - name: Setup Toolchains (ZyC Clang)
       run: |
-        mkdir -p $GITHUB_WORKSPACE/toolchains
-        cd $GITHUB_WORKSPACE/toolchains
-        # Clone standard Android GCC toolchains
-        git clone --depth=1 https://github.com/mvaisakh/gcc-arm64.git
-        git clone --depth=1 https://github.com/mvaisakh/gcc-arm.git
-        
-        # Download and extract ZyC Clang
+        mkdir -p $GITHUB_WORKSPACE/toolchains/zyc-clang
+        cd $GITHUB_WORKSPACE/toolchains/zyc-clang
         DOWNLOAD_URL=$(curl -sL https://api.github.com/repos/ZyCromerZ/Clang/releases/latest | jq -r '.assets[0].browser_download_url')
         wget -qO zyc.tar.gz "$DOWNLOAD_URL"
         tar -xf zyc.tar.gz -C . --strip-components=1 || tar -xf zyc.tar.gz -C .
@@ -114,11 +109,11 @@ jobs:
     - name: Compile Kernel
       run: |
         cd $GITHUB_WORKSPACE/kernel
-        export PATH=$GITHUB_WORKSPACE/toolchains/zyc-clang/bin:$GITHUB_WORKSPACE/toolchains/gcc-arm64/bin:$GITHUB_WORKSPACE/toolchains/gcc-arm/bin:$PATH
+        export PATH=$GITHUB_WORKSPACE/toolchains/zyc-clang/bin:$PATH
         export ARCH=arm64
         export SUBARCH=arm64
-        export CROSS_COMPILE=aarch64-elf-
-        export CROSS_COMPILE_ARM32=arm-eabi-
+        export CROSS_COMPILE=aarch64-linux-gnu-
+        export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
         export CC=clang
         export LD=ld.lld
         export AR=llvm-ar
@@ -133,8 +128,8 @@ jobs:
                       LLVM=1 \
                       LLVM_IAS=1 \
                       CC=clang \
-                      CROSS_COMPILE=aarch64-elf- \
-                      CROSS_COMPILE_ARM32=arm-eabi- \
+                      CROSS_COMPILE=aarch64-linux-gnu- \
+                      CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
                       LD=ld.lld \
                       AR=llvm-ar \
                       NM=llvm-nm \

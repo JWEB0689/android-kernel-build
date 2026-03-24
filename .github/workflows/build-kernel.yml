@@ -134,14 +134,23 @@ jobs:
                       Image.lz4 
                       
     - name: Package with AnyKernel3
+      if: success()
       run: |
         git clone --depth=1 ${{ github.event.inputs.ANYKERNEL3_URL }} $GITHUB_WORKSPACE/AnyKernel3
-        cp $GITHUB_WORKSPACE/kernel/out/arch/arm64/boot/Image.lz4 $GITHUB_WORKSPACE/AnyKernel3/
+        cp $GITHUB_WORKSPACE/kernel/out/arch/arm64/boot/Image.lz4 $GITHUB_WORKSPACE/AnyKernel3/ || true
         cd $GITHUB_WORKSPACE/AnyKernel3
         zip -r9 AnyKernel3-Kernel.zip * -x .git README.md *placeholder
         
-    - name: Upload Artifact
+    - name: Upload AnyKernel3 Artifact
       uses: actions/upload-artifact@v4
+      if: always()
       with:
-        name: AnyKernel3-Kernel-Image
+        name: AnyKernel3-Kernel-Zip
         path: ${{ github.workspace }}/AnyKernel3/AnyKernel3-Kernel.zip
+        
+    - name: Upload Image.lz4 Artifact
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: Image-lz4
+        path: ${{ github.workspace }}/kernel/out/arch/arm64/boot/Image.lz4

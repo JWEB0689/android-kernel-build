@@ -9,30 +9,37 @@ if [ "$USE_KSU" = "true" ]; then
     curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -
 fi
 
+export GIT_TERMINAL_PROMPT=0
+
 # susfs4ksu (Target: Android 13 - 5.15)
 if [ "$USE_SUSFS" = "true" ]; then
     echo "Integrating susfs4ksu..."
-    git clone https://gitlab.com/simonpunk/susfs4ksu.git ../susfs4ksu
+    
+    # Try multiple sources to avoid failures (simonpunk's v2 or sidex15's module)
+    git clone https://gitlab.com/simonpunk/susfs4ksu.git -b v1.5.2 ../susfs4ksu || \
+    git clone https://gitlab.com/simonpunk/susfs4ksu.git ../susfs4ksu || \
+    git clone https://github.com/sidex15/susfs4ksu-module.git ../susfs4ksu
     
     # We apply the specific 5.15 patches to the kernel tree
-    for p in ../susfs4ksu/kernel_patches/5.15/*.patch; do
-      if [ -f "$p" ]; then
-        echo "Applying susfs patch: $p"
-        patch -p1 --force < "$p" || echo "Warning: Failed to apply $p, ignoring..."
-      fi
-    done
-    
-    # Copy necessary headers/code if not fully handled by patch
-    # Add susfs files to kernel tree
-    if [ -d "../susfs4ksu/kernel_patches/5.15/fs" ]; then
-        cp -rv ../susfs4ksu/kernel_patches/5.15/fs/* fs/ || true
+    if [ -d "../susfs4ksu/kernel_patches/5.15" ]; then
+        for p in ../susfs4ksu/kernel_patches/5.15/*.patch; do
+          if [ -f "$p" ]; then
+            echo "Applying susfs patch: $p"
+            patch -p1 --force < "$p" || echo "Warning: Failed to apply $p, ignoring..."
+          fi
+        done
+        
+        # Copy necessary headers/code if not fully handled by patch
+        # Add susfs files to kernel tree
+        if [ -d "../susfs4ksu/kernel_patches/5.15/fs" ]; then
+            cp -rv ../susfs4ksu/kernel_patches/5.15/fs/* fs/ || true
+        fi
+        if [ -d "../susfs4ksu/kernel_patches/5.15/include" ]; then
+            cp -rv ../susfs4ksu/kernel_patches/5.15/include/* include/ || true
+        fi
+    else
+        echo "susfs patches for 5.15 not found in the cloned repository!"
     fi
-    if [ -d "../susfs4ksu/kernel_patches/5.15/include" ]; then
-        cp -rv ../susfs4ksu/kernel_patches/5.15/include/* include/ || true
-    fi
-    
-    # Run the setup script for susfs if available in KSU dir
-    # Note: KSU setup may need manual tweaking if conflicts arrive
 fi
 
 # Kernel Patch Manager (kpm)
@@ -51,7 +58,7 @@ fi
 if [ "$USE_SUKISU" = "true" ]; then
     echo "Integrating sukisu-ultra..."
     # A generic implementation to clone and patch sukisu-ultra features
-    git clone https://github.com/sukisu/sukisu-ultra ../sukisu-ultra || true
+    git clone https://github.com/sidex15/SukiSU-Ultra.git ../sukisu-ultra || true
     if [ -d "../sukisu-ultra/patches" ]; then
         for p in ../sukisu-ultra/patches/*.patch; do
             patch -p1 --force < "$p" || true

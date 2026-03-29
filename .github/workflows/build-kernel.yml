@@ -136,7 +136,7 @@ jobs:
                       OBJCOPY=llvm-objcopy \
                       OBJDUMP=llvm-objdump \
                       STRIP=llvm-strip \
-                      Image.lz4 
+                      Image 
 
     - name: Upload Patch Rejects
       uses: actions/upload-artifact@v4
@@ -149,7 +149,7 @@ jobs:
       if: success()
       run: |
         git clone --depth=1 ${{ github.event.inputs.ANYKERNEL3_URL }} $GITHUB_WORKSPACE/AnyKernel3
-        cp $GITHUB_WORKSPACE/kernel/out/arch/arm64/boot/Image.lz4 $GITHUB_WORKSPACE/AnyKernel3/ || true
+        cp $GITHUB_WORKSPACE/kernel/out/arch/arm64/boot/Image $GITHUB_WORKSPACE/AnyKernel3/ || true
         cd $GITHUB_WORKSPACE/AnyKernel3
         zip -r9 AnyKernel3-Kernel.zip * -x .git README.md *placeholder
         
@@ -164,5 +164,5 @@ jobs:
       uses: actions/upload-artifact@v4
       if: always()
       with:
-        name: Image-lz4
-        path: ${{ github.workspace }}/kernel/out/arch/arm64/boot/Image.lz4
+        name: Image
+        path: ${{ github.workspace }}/kernel/out/arch/arm64/boot/Image

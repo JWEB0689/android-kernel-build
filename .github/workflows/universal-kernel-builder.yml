@@ -1,0 +1,241 @@
+name: Build User Kernel (Git)
+
+permissions:
+  contents: read
+  actions: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_repo:
+        description: "Kernel source git URL"
+        type: string
+        required: true
+      kernel_branch:
+        description: "Branch or tag to build"
+        type: string
+        required: true
+      defconfig:
+        description: "Defconfig name (relative to arch/arm64/configs/)"
+        type: string
+        required: true
+      ksu_fork:
+        description: "KernelSU fork to overlay"
+        type: choice
+        options:
+          - Tiann
+          - SukiSU
+          - ReSukiSU
+          - KernelSU-Next
+          - WKSU
+        default: Tiann
+      add_susfs:
+        description: "Add SUSFS support"
+        type: boolean
+        default: true
+      add_kpm:
+        description: "Add KPM support"
+        type: boolean
+        default: false
+      kernel_image_name:
+        description: "Output image name"
+        type: string
+        default: "Image"
+      anykernel_branch:
+        description: "AnyKernel3 branch"
+        type: string
+        default: "gki-2.0"
+      extra_make_args:
+        description: "Extra make arguments"
+        type: string
+        default: ""
+      lto_mode:
+        description: "LTO mode"
+        type: choice
+        options:
+          - thin
+          - full
+          - none
+        default: thin
+      susfs_branch:
+        description: "SUSFS branch override"
+        type: string
+        default: ""
+
+jobs:
+  build:
+    name: User Kernel Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+    - name: Free Disk Space
+      uses: endersonmenezes/free-disk-space@v3
+      with:
+        remove_android: true
+        remove_dotnet: true
+        remove_haskell: true
+        remove_tool_cache: true
+        remove_swap: true
+        remove_packages: "azure-cli google-cloud-cli microsoft-edge-stable google-chrome-stable firefox postgresql* temurin-* *llvm* mysql* dotnet-sdk-*"
+        remove_packages_one_command: true
+        remove_folders: "/usr/share/swift /usr/share/miniconda /usr/share/az* /usr/local/lib/node_modules /usr/local/share/chromium /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle"
+        rm_cmd: "rmz"
+        rmz_version: "3.1.1"
+        testing: false
+
+    - name: Install Toolchain
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq clang lld llvm gcc-aarch64-linux-gnu binutils bc bison flex libssl-dev libelf-dev cpio kmod python3 python-is-python3
+
+    - name: Clone Kernel Source
+      env:
+        REPO: ${{ inputs.kernel_repo }}
+        BRANCH: ${{ inputs.kernel_branch }}
+      run: git clone --depth=1 --branch "$BRANCH" "$REPO" kernel_source
+
+    - name: Detect Kernel Version
+      run: |
+        cd kernel_source
+        VERSION=$(grep '^VERSION = ' Makefile | awk '{print $3}')
+        PATCHLEVEL=$(grep '^PATCHLEVEL = ' Makefile | awk '{print $3}')
+        SUBLEVEL=$(grep '^SUBLEVEL = ' Makefile | awk '{print $3}')
+        KERNEL_VER="${VERSION}.${PATCHLEVEL}"
+        SUB="${SUBLEVEL:-0}"
+        echo "KERNEL_VER=$KERNEL_VER" >> "$GITHUB_ENV"
+        echo "SUBLEVEL=$SUB" >> "$GITHUB_ENV"
+        echo "FULL_VERSION=${KERNEL_VER}.${SUB}" >> "$GITHUB_ENV"
+        echo "FILE_NAME=${KERNEL_VER}.${SUB}-UserKernel" >> "$GITHUB_ENV"
+
+    - name: Resolve SUSFS Branch
+      if: inputs.add_susfs
+      env:
+        OVERRIDE: ${{ inputs.susfs_branch }}
+      run: |
+        SUSFS_REPO="https://github.com/ShirkNeko/susfs4ksu.git"
+        if [ -n "$OVERRIDE" ]; then
+          echo "SUSFS_BRANCH=$OVERRIDE" >> "$GITHUB_ENV"
+          exit 0
+        fi
+        for AV in android16 android15 android14 android13 android12; do
+          CANDIDATE="gki-${AV}-${KERNEL_VER}"
+          if git ls-remote --heads "$SUSFS_REPO" "$CANDIDATE" | grep -q .; then
+            echo "SUSFS_BRANCH=$CANDIDATE" >> "$GITHUB_ENV"
+            exit 0
+          fi
+        done
+        CANDIDATE="kernel-${KERNEL_VER}"
+        if git ls-remote --heads "$SUSFS_REPO" "$CANDIDATE" | grep -q .; then
+          echo "SUSFS_BRANCH=$CANDIDATE" >> "$GITHUB_ENV"
+          exit 0
+        fi
+        exit 1
+
+    - name: Clone SUSFS Patches
+      if: inputs.add_susfs
+      run: git clone --depth=1 --branch "$SUSFS_BRANCH" https://github.com/ShirkNeko/susfs4ksu.git susfs_patches
+
+    - name: Clone AnyKernel3
+      env:
+        AK_BRANCH: ${{ inputs.anykernel_branch }}
+      run: |
+        git clone --depth=1 --branch "$AK_BRANCH" https://github.com/WildKernels/AnyKernel3.git AnyKernel3
+        rm -rf AnyKernel3/.git
+
+    - name: Clone Tiann KernelSU Base
+      run: git clone --depth=1 https://github.com/tiann/KernelSU.git KSU_BASE
+
+    - name: Apply SUSFS to Tiann Base
+      if: inputs.add_susfs
+      run: |
+        cd KSU_BASE
+        PATCH=$(find "$GITHUB_WORKSPACE/susfs_patches/kernel_patches" -maxdepth 1 -name '50_add_susfs_in_*.patch' | head -1)
+        patch -p1 -F3 --no-backup-if-mismatch < "$PATCH" || true
+
+    - name: Clone Selected Fork
+      run: |
+        case "${{ inputs.ksu_fork }}" in
+          Tiann) ;;
+          SukiSU) git clone --depth=1 https://github.com/SukiSU-Ultra/SukiSU-Ultra.git KSU_FORK ;;
+          ReSukiSU) git clone --depth=1 https://github.com/ReSukiSU/ReSukiSU.git KSU_FORK ;;
+          KernelSU-Next) git clone --depth=1 https://github.com/KernelSU-Next/KernelSU-Next.git KSU_FORK ;;
+          WKSU) git clone --depth=1 https://github.com/WildKernels/Wild_KSU.git KSU_FORK ;;
+        esac
+
+    - name: Safe-Merge Fork Overlay
+      run: |
+        if [ ! -d KSU_FORK ]; then
+          exit 0
+        fi
+        cd KSU_FORK
+        for DIR in core hook feature include manager policy; do
+          if [ -d "$DIR" ]; then
+            rsync -a --ignore-existing "$DIR/" "$GITHUB_WORKSPACE/KSU_BASE/$DIR/"
+          fi
+        done
+
+    - name: Auto-Detect KSU Injection Path
+      run: |
+        cd kernel_source
+        if grep -Rqs "security/" .; then
+          TARGET="security/KernelSU"
+        elif grep -Rqs "kernel/" .; then
+          TARGET="kernel/KernelSU"
+        else
+          TARGET="KernelSU"
+        fi
+        echo "KSU_TARGET=$TARGET" >> "$GITHUB_ENV"
+
+    - name: Inject Merged KSU
+      run: |
+        mkdir -p "kernel_source/${KSU_TARGET}"
+        rsync -a KSU_BASE/ "kernel_source/${KSU_TARGET}/"
+
+    - name: Configure Defconfig
+      working-directory: kernel_source
+      env:
+        ADD_SUSFS: ${{ inputs.add_susfs }}
+        ADD_KPM: ${{ inputs.add_kpm }}
+        DEFCONFIG_NAME: ${{ inputs.defconfig }}
+      run: |
+        DEFCONFIG_PATH="arch/arm64/configs/${DEFCONFIG_NAME}"
+        echo "CONFIG_KSU=y" >> "$DEFCONFIG_PATH"
+        echo "CONFIG_KALLSYMS=y" >> "$DEFCONFIG_PATH"
+        echo "CONFIG_KALLSYMS_ALL=y" >> "$DEFCONFIG_PATH"
+        if [ "$ADD_SUSFS" = "true" ]; then
+          echo "CONFIG_KSU_SUSFS=y" >> "$DEFCONFIG_PATH"
+        fi
+        if [ "$ADD_KPM" = "true" ]; then
+          echo "CONFIG_KPM=y" >> "$DEFCONFIG_PATH"
+        fi
+
+    - name: Build Kernel
+      working-directory: kernel_source
+      env:
+        LTO_MODE: ${{ inputs.lto_mode }}
+        EXTRA_ARGS: ${{ inputs.extra_make_args }}
+        DEFCONFIG_NAME: ${{ inputs.defconfig }}
+      run: |
+        LTO_FLAG=""
+        [ "$LTO_MODE" != "none" ] && LTO_FLAG="LTO=$LTO_MODE"
+        WARN_FLAGS="-Wno-error -Wno-implicit-int -Wno-strict-prototypes -Wno-implicit-function-declaration"
+        MAKE_ARGS="O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- $LTO_FLAG $EXTRA_ARGS"
+        make $MAKE_ARGS KCFLAGS="$WARN_FLAGS" "$DEFCONFIG_NAME"
+        make $MAKE_ARGS KCFLAGS="$WARN_FLAGS" -j$(nproc --all)
+
+    - name: Prepare AnyKernel3
+      env:
+        IMAGE_NAME: ${{ inputs.kernel_image_name }}
+      run: |
+        IMAGE_PATH="kernel_source/out/arch/arm64/boot/${IMAGE_NAME}"
+        cp "$IMAGE_PATH" AnyKernel3/
+        mkdir -p AnyKernel3/dtbs
+        find kernel_source/out/arch/arm64/boot/dts -name "*.dtb" -exec cp {} AnyKernel3/dtbs/ \;
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ env.FILE_NAME }}-AnyKernel3
+        path: ./AnyKernel3/**
+        compression-level: 9

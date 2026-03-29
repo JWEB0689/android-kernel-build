@@ -160,7 +160,7 @@ jobs:
         name: AnyKernel3-Kernel-Zip
         path: ${{ github.workspace }}/AnyKernel3/AnyKernel3-Kernel.zip
         
-    - name: Upload Image.lz4 Artifact
+    - name: Upload Image Artifact
       uses: actions/upload-artifact@v4
       if: always()
       with:

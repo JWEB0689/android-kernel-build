@@ -1,5 +1,24 @@
 name: Universal Kernel Builder — rtwo
 
+# ─────────────────────────────────────────────────────────────
+#  Merges the best features from all four reference workflows:
+#  • build.yml          → custom clang picker, ccache, swap, private-repo
+#  • kernel-user-git    → KSU setup scripts, defconfig pruning, ABI bypass,
+#                         dirty-suffix removal, reject scanner, Job Summary
+#  • universal-builder  → KSU fork overlay, SUSFS auto-detect, KPM toggle
+#  • Build Kernel OnePlus → KSU APK bundling, SUSFS module (CI/Release),
+#                           BBR+ECN, KPM patch_linux binary patching,
+#                           TMPFS_POSIX_ACL config
+#
+#  Extras:
+#  • zeromount module (Enginex0/zeromount) bundled into AnyKernel3 ZIP
+#  • NoMount kernel patch (maxsteeel/nomount) as alternative to plain SUSFS
+#    — uses the combined nomount-susfs-kernel-5.15.patch for zero-mount
+#      injection at the VFS layer (no /proc/mounts pollution)
+#
+#  Hard-coded defaults for: device=rtwo  kmi=android13-5.15
+# ─────────────────────────────────────────────────────────────
+
 permissions:
   contents: read
   actions: write
@@ -42,10 +61,10 @@ on:
         default: SukiSU
 
       # ── SUSFS / NoMount mode ───────────────────────────────
-      # SUSFS_only   → apply standard ShirkNeko SUSFS patch (50_ + 10_)
-      # NoMount_SUSFS → apply maxsteeel's combined nomount-susfs-5.15.patch
+      # SUSFS_only    → standard ShirkNeko SUSFS patch (50_ + 10_)
+      # NoMount_SUSFS → maxsteeel combined nomount-susfs-5.15.patch
       #                 (zero mount table entries + SUSFS hiding; beta)
-      # None         → no SUSFS/NoMount patching at all
+      # None          → no SUSFS/NoMount patching
       susfs_mode:
         description: "SUSFS mode"
         type: choice
@@ -148,6 +167,8 @@ jobs:
       DEVICE:   rtwo
       KMI:      android13-5.15
       OUT_DIR:  out
+      # Opt into Node.js 24 for all JS actions (avoids deprecation warnings)
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
 
@@ -425,20 +446,17 @@ jobs:
 
     # ════════════════════════════════════════════════════════
     # SUSFS MODE: NoMount_SUSFS
-    # Uses maxsteeel/nomount combined patch for kernel 5.15
-    # This replaces ALL standard SUSFS steps above with a
-    # single unified VFS-layer patch — zero mount table entries.
+    # Uses maxsteeel/nomount combined patch for kernel 5.15.
+    # Replaces ALL standard SUSFS steps — zero mount table entries.
     # ════════════════════════════════════════════════════════
 
     - name: "[NoMount_SUSFS] Clone NoMount Repo"
       if: inputs.susfs_mode == 'NoMount_SUSFS' && inputs.ksu_variant != 'None'
       run: |
-        echo "🔩 Cloning maxsteeel/nomount..."
         git clone --depth=1 https://github.com/maxsteeel/nomount.git nomount_repo
-        # Confirm the 5.15 combined patch is present
         PATCH="nomount_repo/patches/nomount-susfs-kernel-5.15.patch"
         [ -f "$PATCH" ] && echo "✅ Found: $PATCH" || \
-          { echo "::error::nomount-susfs-kernel-5.15.patch not found in repo — check upstream"; exit 1; }
+          { echo "::error::nomount-susfs-kernel-5.15.patch not found"; exit 1; }
 
     - name: "[NoMount_SUSFS] Apply Combined NoMount+SUSFS Patch"
       if: inputs.susfs_mode == 'NoMount_SUSFS' && inputs.ksu_variant != 'None'
@@ -446,10 +464,8 @@ jobs:
       run: |
         PATCH="$GITHUB_WORKSPACE/nomount_repo/patches/nomount-susfs-kernel-5.15.patch"
         echo "🔩 Applying nomount-susfs-kernel-5.15.patch (fuzz=10)..."
-        # --fuzz=10 recommended by upstream for out-of-tree kernels
-        patch -p1 --fuzz=10 --no-backup-if-mismatch < "$PATCH" || {
-          echo "::warning::Patch applied with warnings — check for .rej files"
-        }
+        patch -p1 --fuzz=10 --no-backup-if-mismatch < "$PATCH" || \
+          echo "::warning::Patch applied with warnings — check .rej files"
         echo "NOMOUNT_APPLIED=true" >> "$GITHUB_ENV"
         echo "✅ NoMount+SUSFS patch applied"
 
@@ -481,7 +497,7 @@ jobs:
         # ── KPM ──
         [ "$ADD_KPM" = "true" ] && echo "CONFIG_KPM=y" >> "$DEFCONFIG_PATH"
 
-        # ── SUSFS configs (both modes write same KSU_SUSFS flags) ──
+        # ── SUSFS configs (shared by both SUSFS modes) ──
         if [ "$SUSFS_MODE" != "None" ] && [ "$KSU_VARIANT" != "None" ]; then
           cat >> "$DEFCONFIG_PATH" <<'KCONFIG'
         CONFIG_KSU_SUSFS=y
@@ -505,8 +521,7 @@ jobs:
         KCONFIG
         fi
 
-        # ── NoMount subsystem (only when NoMount_SUSFS mode) ──
-        # CONFIG_NOMOUNT enables the VFS-layer injection engine
+        # ── NoMount VFS subsystem ──
         if [ "$SUSFS_MODE" = "NoMount_SUSFS" ] && [ "$KSU_VARIANT" != "None" ]; then
           echo "CONFIG_NOMOUNT=y" >> "$DEFCONFIG_PATH"
           echo "✅ CONFIG_NOMOUNT=y added"
@@ -769,9 +784,9 @@ jobs:
         S() { [[ "$1" == "true" ]] && echo "✅ Enabled" || echo "❌ Disabled"; }
         MODE_LABEL=""
         case "$SUSFS_MODE" in
-          SUSFS_only)   MODE_LABEL="✅ Standard SUSFS (ShirkNeko)" ;;
+          SUSFS_only)    MODE_LABEL="✅ Standard SUSFS (ShirkNeko)" ;;
           NoMount_SUSFS) MODE_LABEL="🔩 NoMount+SUSFS (maxsteeel) — VFS injection, zero mounts" ;;
-          None)         MODE_LABEL="❌ Disabled" ;;
+          None)          MODE_LABEL="❌ Disabled" ;;
         esac
         {
           echo "## 🏗️ Universal Kernel Build — rtwo (android13-5.15)"

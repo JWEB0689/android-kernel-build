@@ -1,11 +1,14 @@
 name: Universal Kernel Builder — rtwo
 
 # ─────────────────────────────────────────────────────────────
-#  Merges the best features from all three reference workflows:
+#  Merges the best features from all four reference workflows:
 #  • build.yml          → custom clang picker, ccache, swap, private-repo
 #  • kernel-user-git    → KSU setup scripts, defconfig pruning, ABI bypass,
 #                         dirty-suffix removal, reject scanner, Job Summary
 #  • universal-builder  → KSU fork overlay, SUSFS auto-detect, KPM toggle
+#  • Build Kernel OnePlus → KSU APK bundling, SUSFS module (CI/Release),
+#                           BBR+ECN, KPM patch_linux binary patching,
+#                           TMPFS_POSIX_ACL config
 #
 #  Hard-coded defaults for: device=rtwo  kmi=android13-5.15
 # ─────────────────────────────────────────────────────────────
@@ -60,12 +63,39 @@ on:
         description: "SUSFS branch override (auto-detect if blank)"
         type: string
         default: "gki-android13-5.15"
+      susfs_module:
+        description: "Bundle SUSFS module into ZIP"
+        type: choice
+        options:
+          - Release
+          - CI
+          - None
+        default: Release
 
       # ── KPM ───────────────────────────────────────────────
       add_kpm:
-        description: "Add KPM support"
+        description: "Add KPM support + patch_linux Image patching"
         type: boolean
         default: false
+
+      # ── KSU APK ───────────────────────────────────────────
+      bundle_ksu_apk:
+        description: "Bundle KernelSU Manager APK into ZIP"
+        type: boolean
+        default: true
+      ksu_apk_variant:
+        description: "KSU APK style (only applies if SukiSU is selected)"
+        type: choice
+        options:
+          - Manager
+          - Spoofed-Manager
+        default: Manager
+
+      # ── Network Config ────────────────────────────────────
+      enable_bbr:
+        description: "Enable BBR + ECN congestion control"
+        type: boolean
+        default: true
 
       # ── Toolchain ─────────────────────────────────────────
       clang_compiler:
@@ -162,7 +192,7 @@ jobs:
           dwarves libelf-dev libssl-dev libfl-dev zstd wget \
           python3 python-is-python3 \
           gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
-          clang lld llvm llvm-dev bison kmod
+          clang lld llvm llvm-dev bison kmod gh
 
     # ── 4. Custom Clang toolchain ────────────────────────────
     - name: Fetch Clang Toolchain
@@ -202,7 +232,6 @@ jobs:
           git clone --recursive --depth=1 "$clang_url" clang
         fi
 
-        # Locate bin directory
         if [ -d "clang/bin" ]; then
           CLANG_PATH="$GITHUB_WORKSPACE/clang/bin"
         else
@@ -418,12 +447,14 @@ jobs:
       env:
         ADD_SUSFS:      ${{ inputs.add_susfs }}
         ADD_KPM:        ${{ inputs.add_kpm }}
+        ENABLE_BBR:     ${{ inputs.enable_bbr }}
         KSU_VARIANT:    ${{ inputs.ksu_variant }}
         DEFCONFIG_NAME: ${{ inputs.defconfig }}
       run: |
         DEFCONFIG_PATH="arch/arm64/configs/${DEFCONFIG_NAME}"
         [ ! -f "$DEFCONFIG_PATH" ] && { echo "::error::Defconfig not found: $DEFCONFIG_PATH"; exit 1; }
 
+        # ── KSU core ──
         if [ "$KSU_VARIANT" != "None" ]; then
           cat >> "$DEFCONFIG_PATH" <<'KCONFIG'
         CONFIG_KSU=y
@@ -432,6 +463,10 @@ jobs:
         KCONFIG
         fi
 
+        # ── KPM ──
+        [ "$ADD_KPM" = "true" ] && echo "CONFIG_KPM=y" >> "$DEFCONFIG_PATH"
+
+        # ── SUSFS ──
         if [ "$ADD_SUSFS" = "true" ] && [ "$KSU_VARIANT" != "None" ]; then
           cat >> "$DEFCONFIG_PATH" <<'KCONFIG'
         CONFIG_KSU_SUSFS=y
@@ -452,20 +487,37 @@ jobs:
         CONFIG_KSU_SUSFS_SUS_SU=y
         CONFIG_KSU_SUSFS_HIDDEN_NAME=y
         CONFIG_KSU_SUSFS_HARDENED=y
-        CONFIG_TMPFS_XATTR=y
         KCONFIG
         fi
 
-        [ "$ADD_KPM" = "true" ] && echo "CONFIG_KPM=y" >> "$DEFCONFIG_PATH"
+        # ── TMPFS (needed for SUSFS + general use) ──
+        cat >> "$DEFCONFIG_PATH" <<'KCONFIG'
+        CONFIG_TMPFS_XATTR=y
+        CONFIG_TMPFS_POSIX_ACL=y
+        KCONFIG
 
-        # Prune any CONFIG_KSU_ entries whose Kconfig symbol doesn't exist in the tree
+        # ── BBR + ECN congestion control ──
+        if [ "$ENABLE_BBR" = "true" ]; then
+          cat >> "$DEFCONFIG_PATH" <<'KCONFIG'
+        CONFIG_TCP_CONG_ADVANCED=y
+        CONFIG_TCP_CONG_BBR=y
+        CONFIG_NET_SCH_FQ=y
+        CONFIG_TCP_CONG_BIC=n
+        CONFIG_TCP_CONG_WESTWOOD=n
+        CONFIG_TCP_CONG_HTCP=n
+        CONFIG_IP_ECN=y
+        CONFIG_TCP_ECN=y
+        CONFIG_IPV6_ECN=y
+        KCONFIG
+        fi
+
+        # ── Prune unsupported CONFIG_KSU_ entries ──
         while IFS='=' read -r cfg _; do
           symbol="${cfg#CONFIG_}"
           grep -Rqx "config ${symbol}" . --include='Kconfig*' 2>/dev/null && continue
           sed -i "/^${cfg}=/d" "$DEFCONFIG_PATH"
         done < <(grep '^CONFIG_KSU_' "$DEFCONFIG_PATH" 2>/dev/null || true)
 
-        # If base SUSFS config got pruned, clean all dependents too
         if ! grep -q '^CONFIG_KSU_SUSFS=' "$DEFCONFIG_PATH" 2>/dev/null; then
           sed -i '/^CONFIG_KSU_SUSFS_/d' "$DEFCONFIG_PATH"
         fi
@@ -507,7 +559,30 @@ jobs:
         path: ${{ github.workspace }}/.ccache
         key: ccache-rtwo-${{ inputs.ksu_variant }}-${{ inputs.clang_compiler }}-${{ github.sha }}
 
-    # ── 21. Pack AnyKernel3 ──────────────────────────────────
+    # ── 21. KPM – patch_linux binary patching ───────────────
+    - name: Apply KPM patch_linux to Image
+      if: inputs.add_kpm
+      run: |
+        IMAGE_PATH="kernel_source/$OUT_DIR/arch/arm64/boot/${{ inputs.kernel_image_name }}"
+        [ ! -f "$IMAGE_PATH" ] && { echo "::error::Image not found for KPM patching"; exit 1; }
+
+        # Clone SukiSU_patch to get the patch_linux binary
+        git clone --depth=1 https://github.com/ShirkNeko/SukiSU_patch.git kpm_patch
+        PATCH_BIN="kpm_patch/kpm/patch_linux"
+
+        if [ -f "$PATCH_BIN" ]; then
+          chmod +x "$PATCH_BIN"
+          cp "$IMAGE_PATH" "./Image.orig"
+          cd "$(dirname "$IMAGE_PATH")"
+          "$GITHUB_WORKSPACE/$PATCH_BIN"
+          [ -f oImage ] && mv oImage "${{ inputs.kernel_image_name }}" && \
+            echo "✅ KPM patch_linux applied successfully" || \
+            { echo "::warning::patch_linux did not produce oImage, using original Image"; }
+        else
+          echo "::warning::patch_linux binary not found in SukiSU_patch/kpm/, skipping"
+        fi
+
+    # ── 22. Pack AnyKernel3 ──────────────────────────────────
     - name: Prepare AnyKernel3
       env:
         IMAGE_NAME: ${{ inputs.kernel_image_name }}
@@ -525,7 +600,104 @@ jobs:
         find "kernel_source/$OUT_DIR/arch/arm64/boot/dts" \
           -name "*.dtb" -exec cp {} AnyKernel3/dtbs/ \; 2>/dev/null || true
 
-    # ── 22. Scan patch rejects ───────────────────────────────
+    # ── 23. Bundle SUSFS module (Release) ────────────────────
+    - name: Download SUSFS Module (Release)
+      if: inputs.susfs_module == 'Release' && inputs.add_susfs && inputs.ksu_variant != 'None'
+      continue-on-error: true
+      run: |
+        echo "📦 Downloading SUSFS module from Release..."
+        wget -q -O ksu_module_susfs.zip \
+          https://github.com/sidex15/ksu_module_susfs/releases/latest/download/ksu_module_susfs_1.5.2+.zip
+        if [ -f ksu_module_susfs.zip ]; then
+          cp ksu_module_susfs.zip AnyKernel3/
+          echo "✅ SUSFS module (Release) added to AnyKernel3"
+        else
+          echo "::warning::SUSFS Release module download failed"
+        fi
+
+    # ── 24. Bundle SUSFS module (CI) ─────────────────────────
+    - name: Download SUSFS Module (CI)
+      if: inputs.susfs_module == 'CI' && inputs.add_susfs && inputs.ksu_variant != 'None'
+      continue-on-error: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        echo "📦 Fetching latest SUSFS CI artifact..."
+        LATEST_RUN_ID=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
+          "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs?status=success" | \
+          jq -r '.workflow_runs[] | select(.head_branch == "v1.5.2+") | .id' | head -n 1)
+
+        if [ -z "$LATEST_RUN_ID" ]; then
+          echo "::warning::No successful SUSFS CI run found for branch v1.5.2+"
+          exit 0
+        fi
+
+        ARTIFACT_URL=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
+          "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs/$LATEST_RUN_ID/artifacts" | \
+          jq -r '.artifacts[0].archive_download_url')
+
+        if [ -n "$ARTIFACT_URL" ]; then
+          curl -fL -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -o ksu_module_susfs_CI.zip "$ARTIFACT_URL"
+          cp ksu_module_susfs_CI.zip AnyKernel3/
+          echo "✅ SUSFS module (CI) added to AnyKernel3"
+        else
+          echo "::warning::Failed to locate SUSFS CI artifact URL"
+        fi
+
+    # ── 25. Bundle KernelSU Manager APK ─────────────────────
+    - name: Download KernelSU Manager APK
+      if: inputs.bundle_ksu_apk && inputs.ksu_variant != 'None'
+      continue-on-error: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        KSU_VARIANT:  ${{ inputs.ksu_variant }}
+        APK_ARTIFACT: ${{ inputs.ksu_apk_variant }}
+      run: |
+        echo "📱 Fetching KSU Manager APK for $KSU_VARIANT..."
+
+        download_sukisu_apk() {
+          local branch="$1"
+          local artifact="$2"
+          run_id=$(gh api \
+            "repos/SukiSU-Ultra/SukiSU-Ultra/actions/workflows/build-manager.yml/runs?branch=${branch}&status=success&per_page=1" \
+            --jq '.workflow_runs[0].id' 2>/dev/null || echo "")
+          [ -z "$run_id" ] && { echo "::warning::No successful SukiSU build run on branch $branch"; return 1; }
+
+          artifact_url=$(gh api "repos/SukiSU-Ultra/SukiSU-Ultra/actions/runs/$run_id/artifacts" | \
+            jq -r ".artifacts[] | select(.name == \"$artifact\") | .archive_download_url" | head -n1)
+          [ -z "$artifact_url" ] && { echo "::warning::Artifact '$artifact' not found in run $run_id"; return 1; }
+
+          curl -fL -H "Authorization: token $GITHUB_TOKEN" -o "KSU_Manager.zip" "$artifact_url"
+          unzip -j KSU_Manager.zip "*.apk" -d AnyKernel3/ && \
+            echo "✅ SukiSU APK ($artifact) added to AnyKernel3"
+        }
+
+        download_tiann_apk() {
+          APK_URL=$(curl -sL "https://api.github.com/repos/tiann/KernelSU/releases/latest" | \
+            jq -r '.assets[] | select(.name | endswith(".apk")) | .browser_download_url' | head -n1)
+          [ -z "$APK_URL" ] && { echo "::warning::Tiann KernelSU APK not found"; return 1; }
+          wget -q -O AnyKernel3/KernelSU.apk "$APK_URL" && echo "✅ Tiann KernelSU APK added"
+        }
+
+        download_next_apk() {
+          APK_URL=$(curl -sL "https://api.github.com/repos/KernelSU-Next/KernelSU-Next/releases/latest" | \
+            jq -r '.assets[] | select(.name | endswith(".apk")) | .browser_download_url' | head -n1)
+          [ -z "$APK_URL" ] && { echo "::warning::KernelSU-Next APK not found"; return 1; }
+          wget -q -O AnyKernel3/KernelSU-Next.apk "$APK_URL" && echo "✅ KernelSU-Next APK added"
+        }
+
+        case "$KSU_VARIANT" in
+          SukiSU)   download_sukisu_apk "main" "$APK_ARTIFACT" ;;
+          ReSukiSU) download_sukisu_apk "main" "Manager" ;;
+          Tiann)    download_tiann_apk ;;
+          KernelSU-Next) download_next_apk ;;
+          WKSU)
+            echo "::warning::No automated APK source for WKSU, skipping"
+            ;;
+        esac
+
+    # ── 26. Scan patch rejects ───────────────────────────────
     - name: Scan Patch Rejects
       if: always()
       run: |
@@ -546,7 +718,7 @@ jobs:
           done
         fi
 
-    # ── 23. Upload AnyKernel3 ZIP ────────────────────────────
+    # ── 27. Upload AnyKernel3 ZIP ────────────────────────────
     - name: Upload AnyKernel3
       uses: actions/upload-artifact@v4
       with:
@@ -556,7 +728,7 @@ jobs:
         compression-level: 9
         retention-days: 30
 
-    # ── 24. Upload patch rejects ─────────────────────────────
+    # ── 28. Upload patch rejects ─────────────────────────────
     - name: Upload Patch Rejects
       if: always() && env.REJ_COUNT > 0
       uses: actions/upload-artifact@v4
@@ -566,18 +738,21 @@ jobs:
         if-no-files-found: ignore
         compression-level: 9
 
-    # ── 25. Job Summary ──────────────────────────────────────
+    # ── 29. Job Summary ──────────────────────────────────────
     - name: Job Summary
       if: always()
       env:
-        ADD_SUSFS:   ${{ inputs.add_susfs }}
-        ADD_KPM:     ${{ inputs.add_kpm }}
-        KSU_VARIANT: ${{ inputs.ksu_variant }}
-        CLANG:       ${{ inputs.clang_compiler }}
-        LTO:         ${{ inputs.lto_mode }}
-        REPO:        ${{ inputs.kernel_repo }}
-        BRANCH:      ${{ inputs.kernel_branch }}
-        IMAGE:       ${{ inputs.kernel_image_name }}
+        ADD_SUSFS:    ${{ inputs.add_susfs }}
+        ADD_KPM:      ${{ inputs.add_kpm }}
+        ENABLE_BBR:   ${{ inputs.enable_bbr }}
+        SUSFS_MODULE: ${{ inputs.susfs_module }}
+        BUNDLE_APK:   ${{ inputs.bundle_ksu_apk }}
+        KSU_VARIANT:  ${{ inputs.ksu_variant }}
+        CLANG:        ${{ inputs.clang_compiler }}
+        LTO:          ${{ inputs.lto_mode }}
+        REPO:         ${{ inputs.kernel_repo }}
+        BRANCH:       ${{ inputs.kernel_branch }}
+        IMAGE:        ${{ inputs.kernel_image_name }}
       run: |
         S() { [[ "$1" == "true" ]] && echo "✅ Enabled" || echo "❌ Disabled"; }
         {
@@ -593,7 +768,10 @@ jobs:
           echo "| **KSU Variant** | ${KSU_VARIANT} |"
           echo "| **SUSFS** | $(S "$ADD_SUSFS") |"
           echo "| **SUSFS Branch** | ${SUSFS_BRANCH:-N/A} |"
+          echo "| **SUSFS Module** | ${SUSFS_MODULE} |"
+          echo "| **KSU APK Bundled** | $(S "$BUNDLE_APK") |"
           echo "| **KPM** | $(S "$ADD_KPM") |"
+          echo "| **BBR + ECN** | $(S "$ENABLE_BBR") |"
           echo "| **Clang** | ${CLANG} |"
           echo "| **LTO** | ${LTO} |"
           echo "| **Image** | ${IMAGE} |"

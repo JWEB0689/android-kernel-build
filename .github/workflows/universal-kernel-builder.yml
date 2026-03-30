@@ -1,4 +1,14 @@
-name: Build User Kernel (Git)
+name: Universal Kernel Builder — rtwo
+
+# ─────────────────────────────────────────────────────────────
+#  Merges the best features from all three reference workflows:
+#  • build.yml          → custom clang picker, ccache, swap, private-repo
+#  • kernel-user-git    → KSU setup scripts, defconfig pruning, ABI bypass,
+#                         dirty-suffix removal, reject scanner, Job Summary
+#  • universal-builder  → KSU fork overlay, SUSFS auto-detect, KPM toggle
+#
+#  Hard-coded defaults for: device=rtwo  kmi=android13-5.15
+# ─────────────────────────────────────────────────────────────
 
 permissions:
   contents: read
@@ -7,48 +17,69 @@ permissions:
 on:
   workflow_dispatch:
     inputs:
+
+      # ── Kernel Source ──────────────────────────────────────
       kernel_repo:
         description: "Kernel source git URL"
         type: string
         required: true
       kernel_branch:
-        description: "Branch or tag to build"
+        description: "Branch / tag to build"
         type: string
         required: true
+      kernel_private:
+        description: "Private source (needs PRIVATE_REPO_TOKEN secret)"
+        type: boolean
+        default: false
+
+      # ── Device / Defconfig ─────────────────────────────────
       defconfig:
-        description: "Defconfig name (relative to arch/arm64/configs/)"
+        description: "Defconfig (relative to arch/arm64/configs/)"
         type: string
-        required: true
-      ksu_fork:
-        description: "KernelSU fork to overlay"
+        default: "rtwo_defconfig"
+
+      # ── KernelSU ───────────────────────────────────────────
+      ksu_variant:
+        description: "KernelSU variant"
         type: choice
         options:
-          - Tiann
           - SukiSU
           - ReSukiSU
           - KernelSU-Next
           - WKSU
-        default: Tiann
+          - Tiann
+          - None
+        default: SukiSU
+
+      # ── SUSFS ─────────────────────────────────────────────
       add_susfs:
-        description: "Add SUSFS support"
+        description: "Add SUSFS patches"
         type: boolean
         default: true
+      susfs_branch:
+        description: "SUSFS branch override (auto-detect if blank)"
+        type: string
+        default: "gki-android13-5.15"
+
+      # ── KPM ───────────────────────────────────────────────
       add_kpm:
         description: "Add KPM support"
         type: boolean
         default: false
-      kernel_image_name:
-        description: "Output image name"
-        type: string
-        default: "Image"
-      anykernel_branch:
-        description: "AnyKernel3 branch"
-        type: string
-        default: "gki-2.0"
-      extra_make_args:
-        description: "Extra make arguments"
-        type: string
-        default: ""
+
+      # ── Toolchain ─────────────────────────────────────────
+      clang_compiler:
+        description: "Clang toolchain"
+        type: choice
+        options:
+          - ZyC Clang
+          - Greenforce Clang
+          - WeebX Clang
+          - SuperRyzen Clang
+          - System Clang
+        default: ZyC Clang
+
+      # ── Build Options ─────────────────────────────────────
       lto_mode:
         description: "LTO mode"
         type: choice
@@ -57,18 +88,39 @@ on:
           - full
           - none
         default: thin
-      susfs_branch:
-        description: "SUSFS branch override"
+      kernel_image_name:
+        description: "Output image (Image / Image.gz / Image.lz4)"
+        type: string
+        default: "Image"
+      extra_make_args:
+        description: "Extra make arguments"
+        type: string
+        default: ""
+      local_version:
+        description: "Custom localversion (e.g. -rtwo-ultra)"
         type: string
         default: ""
 
+      # ── AnyKernel3 ────────────────────────────────────────
+      anykernel_branch:
+        description: "AnyKernel3 branch"
+        type: string
+        default: "gki-2.0"
+
 jobs:
   build:
-    name: User Kernel Build
+    name: "Build [${{ inputs.ksu_variant }}] [${{ inputs.clang_compiler }}]"
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 150
+
+    env:
+      DEVICE:   rtwo
+      KMI:      android13-5.15
+      OUT_DIR:  out
 
     steps:
+
+    # ── 1. Free disk space ──────────────────────────────────
     - name: Free Disk Space
       uses: endersonmenezes/free-disk-space@v3
       with:
@@ -77,165 +129,475 @@ jobs:
         remove_haskell: true
         remove_tool_cache: true
         remove_swap: true
-        remove_packages: "azure-cli google-cloud-cli microsoft-edge-stable google-chrome-stable firefox postgresql* temurin-* *llvm* mysql* dotnet-sdk-*"
+        remove_packages: >-
+          azure-cli google-cloud-cli microsoft-edge-stable google-chrome-stable
+          firefox postgresql* temurin-* *llvm* mysql* dotnet-sdk-*
         remove_packages_one_command: true
-        remove_folders: "/usr/share/swift /usr/share/miniconda /usr/share/az* /usr/local/lib/node_modules /usr/local/share/chromium /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle"
-        rm_cmd: "rmz"
+        remove_folders: >-
+          /usr/share/swift /usr/share/miniconda /usr/share/az*
+          /usr/local/lib/node_modules /usr/local/share/chromium
+          /usr/local/share/powershell /usr/local/julia
+          /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle
+        rm_cmd: rmz
         rmz_version: "3.1.1"
         testing: false
 
-    - name: Install Toolchain
+    # ── 2. Swap ─────────────────────────────────────────────
+    - name: Set Swap to 20G
+      uses: pierotofy/set-swap-space@master
+      with:
+        swap-size-gb: 20
+
+    - name: Tune Swap Aggressiveness
+      run: |
+        echo "vm.swappiness=100" | sudo tee -a /etc/sysctl.conf
+        sudo sysctl -p
+
+    # ── 3. Base packages ────────────────────────────────────
+    - name: Install Build Prerequisites
       run: |
         sudo apt-get update -qq
-        sudo apt-get install -y -qq clang lld llvm gcc-aarch64-linux-gnu binutils bc bison flex libssl-dev libelf-dev cpio kmod python3 python-is-python3
+        sudo apt-get install -y -qq \
+          build-essential bc curl flex cpio ccache rsync git zip \
+          dwarves libelf-dev libssl-dev libfl-dev zstd wget \
+          python3 python-is-python3 \
+          gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+          clang lld llvm llvm-dev bison kmod
 
+    # ── 4. Custom Clang toolchain ────────────────────────────
+    - name: Fetch Clang Toolchain
+      if: inputs.clang_compiler != 'System Clang'
+      run: |
+        set -e
+
+        get_latest_github_release() {
+          local repo_url="$1"
+          latest_url=$(curl -sL "https://api.github.com/repos/$repo_url/releases/latest" \
+            | grep "browser_download_url.*tar.gz" | cut -d '"' -f 4 | head -n 1)
+          [ -z "$latest_url" ] && { echo "❌ Failed to fetch release from $repo_url"; exit 1; }
+          printf "%s" "$latest_url"
+        }
+
+        case "${{ inputs.clang_compiler }}" in
+          "ZyC Clang")
+            clang_url=$(get_latest_github_release "ZyCromerZ/Clang") ;;
+          "Greenforce Clang")
+            clang_url=$(get_latest_github_release "greenforce-project/greenforce_clang") ;;
+          "WeebX Clang")
+            clang_url=$(get_latest_github_release "XSans0/WeebX-Clang") ;;
+          "SuperRyzen Clang")
+            clang_url="https://gitlab.com/TianWalkzzMiku/SuperRyzen-Clang/" ;;
+          *)
+            echo "❌ Unsupported compiler: ${{ inputs.clang_compiler }}"; exit 1 ;;
+        esac
+
+        echo "✅ Clang source: $clang_url"
+        mkdir -p clang
+
+        if [[ "$clang_url" == *.tar.gz ]]; then
+          wget --progress=bar:force -O clang/clang.tar.gz "$clang_url"
+          tar -xf clang/clang.tar.gz -C clang
+          rm -f clang/clang.tar.gz
+        else
+          git clone --recursive --depth=1 "$clang_url" clang
+        fi
+
+        # Locate bin directory
+        if [ -d "clang/bin" ]; then
+          CLANG_PATH="$GITHUB_WORKSPACE/clang/bin"
+        else
+          CLANG_PATH=$(find clang -type d -name "bin" | head -n 1)
+          CLANG_PATH="$GITHUB_WORKSPACE/${CLANG_PATH}"
+        fi
+
+        [ ! -f "$CLANG_PATH/clang" ] && { echo "❌ clang binary not found in $CLANG_PATH"; ls -R clang; exit 1; }
+
+        echo "✅ Using Clang from $CLANG_PATH"
+        echo "CLANG_PATH=$CLANG_PATH" >> "$GITHUB_ENV"
+        echo "$CLANG_PATH" >> "$GITHUB_PATH"
+        clang --version
+
+    # ── 5. Configure ccache ──────────────────────────────────
+    - name: Configure ccache
+      run: |
+        echo "CCACHE_DIR=${{ github.workspace }}/.ccache" >> "$GITHUB_ENV"
+        echo "CCACHE_NOCOMPRESS=true" >> "$GITHUB_ENV"
+        echo "CCACHE_MAXSIZE=10G" >> "$GITHUB_ENV"
+        echo "CCACHE_CPP2=yes" >> "$GITHUB_ENV"
+
+    - name: Restore ccache
+      uses: actions/cache@v4
+      with:
+        path: ${{ github.workspace }}/.ccache
+        key: ccache-rtwo-${{ inputs.ksu_variant }}-${{ inputs.clang_compiler }}-${{ github.sha }}
+        restore-keys: ccache-rtwo-${{ inputs.ksu_variant }}-${{ inputs.clang_compiler }}-
+
+    # ── 6. Clone kernel source ──────────────────────────────
     - name: Clone Kernel Source
       env:
-        REPO: ${{ inputs.kernel_repo }}
-        BRANCH: ${{ inputs.kernel_branch }}
-      run: git clone --depth=1 --branch "$BRANCH" "$REPO" kernel_source
+        REPO:    ${{ inputs.kernel_repo }}
+        BRANCH:  ${{ inputs.kernel_branch }}
+        PRIVATE: ${{ inputs.kernel_private }}
+      run: |
+        set -e
+        if [ "$PRIVATE" == "true" ]; then
+          if [[ "$REPO" == *"github.com"* ]]; then
+            OWNER=$(echo "${REPO#https://github.com/}" | cut -d'/' -f1)
+            AUTH_URL="https://${OWNER}:${{ secrets.PRIVATE_REPO_TOKEN }}@${REPO#https://}"
+          elif [[ "$REPO" == *"gitlab.com"* ]]; then
+            OWNER=$(echo "${REPO#https://gitlab.com/}" | cut -d'/' -f1)
+            AUTH_URL="https://${OWNER}:${{ secrets.PRIVATE_REPO_TOKEN }}@${REPO#https://}"
+          else
+            echo "❌ Unsupported private host"; exit 1
+          fi
+          git clone --depth=1 --branch "$BRANCH" "$AUTH_URL" kernel_source
+        else
+          git clone --depth=1 --branch "$BRANCH" "$REPO" kernel_source
+        fi
 
+    # ── 7. Detect kernel version ────────────────────────────
     - name: Detect Kernel Version
       run: |
         cd kernel_source
         VERSION=$(grep '^VERSION = ' Makefile | awk '{print $3}')
         PATCHLEVEL=$(grep '^PATCHLEVEL = ' Makefile | awk '{print $3}')
         SUBLEVEL=$(grep '^SUBLEVEL = ' Makefile | awk '{print $3}')
+        [ -z "$VERSION" ] || [ -z "$PATCHLEVEL" ] && { echo "::error::Cannot parse kernel version"; exit 1; }
+
         KERNEL_VER="${VERSION}.${PATCHLEVEL}"
         SUB="${SUBLEVEL:-0}"
-        echo "KERNEL_VER=$KERNEL_VER" >> "$GITHUB_ENV"
-        echo "SUBLEVEL=$SUB" >> "$GITHUB_ENV"
-        echo "FULL_VERSION=${KERNEL_VER}.${SUB}" >> "$GITHUB_ENV"
-        echo "FILE_NAME=${KERNEL_VER}.${SUB}-UserKernel" >> "$GITHUB_ENV"
+        BUILD_TIME=$(date +'%Y%m%d-%H%M')
 
+        {
+          echo "KERNEL_VER=$KERNEL_VER"
+          echo "SUBLEVEL=$SUB"
+          echo "FULL_VERSION=${KERNEL_VER}.${SUB}"
+          echo "FILE_NAME=rtwo-${KERNEL_VER}.${SUB}-${{ inputs.ksu_variant }}"
+          echo "BUILD_TIME=$BUILD_TIME"
+        } >> "$GITHUB_ENV"
+        echo "Detected kernel ${KERNEL_VER}.${SUB}"
+
+    # ── 8. Apply localversion ───────────────────────────────
+    - name: Set Localversion
+      if: inputs.local_version != ''
+      working-directory: kernel_source
+      run: |
+        DEFCONFIG="arch/arm64/configs/${{ inputs.defconfig }}"
+        echo "CONFIG_LOCALVERSION=\"${{ inputs.local_version }}\"" >> "$DEFCONFIG"
+        echo "✅ Set CONFIG_LOCALVERSION=${{ inputs.local_version }}"
+
+    # ── 9. Remove -dirty suffix ─────────────────────────────
+    - name: Remove Dirty Suffix
+      working-directory: kernel_source
+      run: |
+        [ -f scripts/setlocalversion ] && \
+          sed -i 's/ -dirty//g; s/printf.*-dirty.*//' scripts/setlocalversion || true
+
+    # ── 10. Bypass ABI checks ───────────────────────────────
+    - name: Bypass ABI Checks
+      working-directory: kernel_source
+      run: |
+        touch abi_symbollist.raw 2>/dev/null || true
+        sed -i 's/check_defconfig//' build.config.gki 2>/dev/null || true
+        scripts/config --file "arch/arm64/configs/${{ inputs.defconfig }}" \
+          -d TRIM_UNUSED_KSYMS 2>/dev/null || true
+
+    # ── 11. Resolve SUSFS branch ─────────────────────────────
     - name: Resolve SUSFS Branch
-      if: inputs.add_susfs
+      if: inputs.add_susfs && inputs.ksu_variant != 'None'
       env:
         OVERRIDE: ${{ inputs.susfs_branch }}
       run: |
         SUSFS_REPO="https://github.com/ShirkNeko/susfs4ksu.git"
         if [ -n "$OVERRIDE" ]; then
           echo "SUSFS_BRANCH=$OVERRIDE" >> "$GITHUB_ENV"
+          echo "Using override: $OVERRIDE"
           exit 0
         fi
         for AV in android16 android15 android14 android13 android12; do
           CANDIDATE="gki-${AV}-${KERNEL_VER}"
-          if git ls-remote --heads "$SUSFS_REPO" "$CANDIDATE" | grep -q .; then
+          if git ls-remote --heads "$SUSFS_REPO" "$CANDIDATE" 2>/dev/null | grep -q .; then
             echo "SUSFS_BRANCH=$CANDIDATE" >> "$GITHUB_ENV"
+            echo "Auto-resolved SUSFS branch: $CANDIDATE"
             exit 0
           fi
         done
         CANDIDATE="kernel-${KERNEL_VER}"
-        if git ls-remote --heads "$SUSFS_REPO" "$CANDIDATE" | grep -q .; then
+        if git ls-remote --heads "$SUSFS_REPO" "$CANDIDATE" 2>/dev/null | grep -q .; then
           echo "SUSFS_BRANCH=$CANDIDATE" >> "$GITHUB_ENV"
+          echo "Auto-resolved: $CANDIDATE"
           exit 0
         fi
+        echo "::error::No SUSFS branch found for kernel ${KERNEL_VER}. Set susfs_branch manually."
         exit 1
 
+    # ── 12. Clone SUSFS patches ──────────────────────────────
     - name: Clone SUSFS Patches
-      if: inputs.add_susfs
-      run: git clone --depth=1 --branch "$SUSFS_BRANCH" https://github.com/ShirkNeko/susfs4ksu.git susfs_patches
-
-    - name: Clone AnyKernel3
-      env:
-        AK_BRANCH: ${{ inputs.anykernel_branch }}
+      if: inputs.add_susfs && inputs.ksu_variant != 'None'
       run: |
-        git clone --depth=1 --branch "$AK_BRANCH" https://github.com/WildKernels/AnyKernel3.git AnyKernel3
+        git clone --depth=1 --branch "$SUSFS_BRANCH" \
+          https://github.com/ShirkNeko/susfs4ksu.git susfs_patches
+
+    # ── 13. Clone AnyKernel3 ────────────────────────────────
+    - name: Clone AnyKernel3
+      run: |
+        git clone --depth=1 --branch "${{ inputs.anykernel_branch }}" \
+          https://github.com/WildKernels/AnyKernel3.git AnyKernel3
         rm -rf AnyKernel3/.git
 
-    - name: Clone Tiann KernelSU Base
-      run: git clone --depth=1 https://github.com/tiann/KernelSU.git KSU_BASE
-
-    - name: Apply SUSFS to Tiann Base
-      if: inputs.add_susfs
+    # ── 14. Setup KernelSU ──────────────────────────────────
+    - name: Setup KernelSU
+      if: inputs.ksu_variant != 'None'
+      working-directory: kernel_source
+      env:
+        KSU_VARIANT: ${{ inputs.ksu_variant }}
       run: |
-        cd KSU_BASE
-        PATCH=$(find "$GITHUB_WORKSPACE/susfs_patches/kernel_patches" -maxdepth 1 -name '50_add_susfs_in_*.patch' | head -1)
-        patch -p1 -F3 --no-backup-if-mismatch < "$PATCH" || true
+        rm -rf KernelSU KernelSU-Next Wild_KSU drivers/kernelsu
 
-    - name: Clone Selected Fork
-      run: |
-        case "${{ inputs.ksu_fork }}" in
-          Tiann) ;;
-          SukiSU) git clone --depth=1 https://github.com/SukiSU-Ultra/SukiSU-Ultra.git KSU_FORK ;;
-          ReSukiSU) git clone --depth=1 https://github.com/ReSukiSU/ReSukiSU.git KSU_FORK ;;
-          KernelSU-Next) git clone --depth=1 https://github.com/KernelSU-Next/KernelSU-Next.git KSU_FORK ;;
-          WKSU) git clone --depth=1 https://github.com/WildKernels/Wild_KSU.git KSU_FORK ;;
+        case "$KSU_VARIANT" in
+          Tiann)
+            curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -
+            echo "KSU_DIR=KernelSU" >> "$GITHUB_ENV"
+            ;;
+          SukiSU)
+            curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
+            echo "KSU_DIR=KernelSU" >> "$GITHUB_ENV"
+            ;;
+          ReSukiSU)
+            curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s susfs-ksud
+            echo "KSU_DIR=KernelSU" >> "$GITHUB_ENV"
+            ;;
+          KernelSU-Next)
+            curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/stable/kernel/setup.sh" | bash -s stable
+            echo "KSU_DIR=KernelSU-Next" >> "$GITHUB_ENV"
+            ;;
+          WKSU)
+            curl -LSs "https://raw.githubusercontent.com/WildKernels/Wild_KSU/stable/kernel/setup.sh" | bash -s canary
+            echo "KSU_DIR=Wild_KSU" >> "$GITHUB_ENV"
+            ;;
         esac
 
-    - name: Safe-Merge Fork Overlay
+    # ── 15. Apply upstream SUSFS patch ──────────────────────
+    - name: Apply Upstream SUSFS Patch
+      if: inputs.add_susfs && inputs.ksu_variant != 'None'
+      working-directory: kernel_source
       run: |
-        if [ ! -d KSU_FORK ]; then
+        PATCH=$(find "$GITHUB_WORKSPACE/susfs_patches/kernel_patches" \
+          -maxdepth 1 -name '50_add_susfs_in_*.patch' | head -1)
+        [ -z "$PATCH" ] && { echo "::error::50_ SUSFS patch not found"; exit 1; }
+        echo "Applying: $(basename "$PATCH")"
+        patch -p1 -F3 --no-backup-if-mismatch < "$PATCH" || true
+
+    # ── 16. Copy SUSFS source files ──────────────────────────
+    - name: Copy SUSFS Source Files
+      if: inputs.add_susfs && inputs.ksu_variant != 'None'
+      working-directory: kernel_source
+      run: |
+        mkdir -p fs include/linux
+        cp -r "$GITHUB_WORKSPACE/susfs_patches/kernel_patches/fs/"* fs/ 2>/dev/null || true
+        cp -r "$GITHUB_WORKSPACE/susfs_patches/kernel_patches/include/linux/"* include/linux/ 2>/dev/null || true
+
+    # ── 17. Apply KSU-side SUSFS patch ──────────────────────
+    - name: Apply KSU-side SUSFS Patch
+      if: inputs.add_susfs && inputs.ksu_variant != 'None'
+      run: |
+        cd "kernel_source/$KSU_DIR"
+        if grep -rq 'config KSU_SUSFS' kernel/Kconfig 2>/dev/null; then
+          echo "SUSFS already integrated in $KSU_DIR — skipping 10_ patch"
           exit 0
         fi
-        cd KSU_FORK
-        for DIR in core hook feature include manager policy; do
-          if [ -d "$DIR" ]; then
-            rsync -a --ignore-existing "$DIR/" "$GITHUB_WORKSPACE/KSU_BASE/$DIR/"
-          fi
-        done
+        KSU_PATCH=$(find "$GITHUB_WORKSPACE/susfs_patches/kernel_patches/KernelSU" \
+          -name '10_enable_susfs_for_ksu.patch' 2>/dev/null | head -1)
+        [ -z "$KSU_PATCH" ] && { echo "::warning::No 10_ KSU patch found, skipping"; exit 0; }
+        patch -p1 -F3 --no-backup-if-mismatch < "$KSU_PATCH" || \
+          echo "::warning::10_ patch soft-failed — SUSFS Kconfig may be pruned"
 
-    - name: Auto-Detect KSU Injection Path
-      run: |
-        cd kernel_source
-        if grep -Rqs "security/" .; then
-          TARGET="security/KernelSU"
-        elif grep -Rqs "kernel/" .; then
-          TARGET="kernel/KernelSU"
-        else
-          TARGET="KernelSU"
-        fi
-        echo "KSU_TARGET=$TARGET" >> "$GITHUB_ENV"
-
-    - name: Inject Merged KSU
-      run: |
-        mkdir -p "kernel_source/${KSU_TARGET}"
-        rsync -a KSU_BASE/ "kernel_source/${KSU_TARGET}/"
-
+    # ── 18. Configure defconfig ──────────────────────────────
     - name: Configure Defconfig
       working-directory: kernel_source
       env:
-        ADD_SUSFS: ${{ inputs.add_susfs }}
-        ADD_KPM: ${{ inputs.add_kpm }}
+        ADD_SUSFS:      ${{ inputs.add_susfs }}
+        ADD_KPM:        ${{ inputs.add_kpm }}
+        KSU_VARIANT:    ${{ inputs.ksu_variant }}
         DEFCONFIG_NAME: ${{ inputs.defconfig }}
       run: |
         DEFCONFIG_PATH="arch/arm64/configs/${DEFCONFIG_NAME}"
-        echo "CONFIG_KSU=y" >> "$DEFCONFIG_PATH"
-        echo "CONFIG_KALLSYMS=y" >> "$DEFCONFIG_PATH"
-        echo "CONFIG_KALLSYMS_ALL=y" >> "$DEFCONFIG_PATH"
-        if [ "$ADD_SUSFS" = "true" ]; then
-          echo "CONFIG_KSU_SUSFS=y" >> "$DEFCONFIG_PATH"
-        fi
-        if [ "$ADD_KPM" = "true" ]; then
-          echo "CONFIG_KPM=y" >> "$DEFCONFIG_PATH"
+        [ ! -f "$DEFCONFIG_PATH" ] && { echo "::error::Defconfig not found: $DEFCONFIG_PATH"; exit 1; }
+
+        if [ "$KSU_VARIANT" != "None" ]; then
+          cat >> "$DEFCONFIG_PATH" <<'KCONFIG'
+        CONFIG_KSU=y
+        CONFIG_KALLSYMS=y
+        CONFIG_KALLSYMS_ALL=y
+        KCONFIG
         fi
 
+        if [ "$ADD_SUSFS" = "true" ] && [ "$KSU_VARIANT" != "None" ]; then
+          cat >> "$DEFCONFIG_PATH" <<'KCONFIG'
+        CONFIG_KSU_SUSFS=y
+        CONFIG_KSU_SUSFS_SUS_PATH=y
+        CONFIG_KSU_SUSFS_SUS_MOUNT=y
+        CONFIG_KSU_SUSFS_SUS_KSTAT=y
+        CONFIG_KSU_SUSFS_SUS_KSTAT_REDIRECT=y
+        CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y
+        CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
+        CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
+        CONFIG_KSU_SUSFS_TRY_UMOUNT=y
+        CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y
+        CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+        CONFIG_KSU_SUSFS_ENABLE_LOG=y
+        CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
+        CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
+        CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+        CONFIG_KSU_SUSFS_SUS_SU=y
+        CONFIG_KSU_SUSFS_HIDDEN_NAME=y
+        CONFIG_KSU_SUSFS_HARDENED=y
+        CONFIG_TMPFS_XATTR=y
+        KCONFIG
+        fi
+
+        [ "$ADD_KPM" = "true" ] && echo "CONFIG_KPM=y" >> "$DEFCONFIG_PATH"
+
+        # Prune any CONFIG_KSU_ entries whose Kconfig symbol doesn't exist in the tree
+        while IFS='=' read -r cfg _; do
+          symbol="${cfg#CONFIG_}"
+          grep -Rqx "config ${symbol}" . --include='Kconfig*' 2>/dev/null && continue
+          sed -i "/^${cfg}=/d" "$DEFCONFIG_PATH"
+        done < <(grep '^CONFIG_KSU_' "$DEFCONFIG_PATH" 2>/dev/null || true)
+
+        # If base SUSFS config got pruned, clean all dependents too
+        if ! grep -q '^CONFIG_KSU_SUSFS=' "$DEFCONFIG_PATH" 2>/dev/null; then
+          sed -i '/^CONFIG_KSU_SUSFS_/d' "$DEFCONFIG_PATH"
+        fi
+
+    # ── 19. Build kernel ────────────────────────────────────
     - name: Build Kernel
       working-directory: kernel_source
       env:
-        LTO_MODE: ${{ inputs.lto_mode }}
-        EXTRA_ARGS: ${{ inputs.extra_make_args }}
+        LTO_MODE:       ${{ inputs.lto_mode }}
+        EXTRA_ARGS:     ${{ inputs.extra_make_args }}
         DEFCONFIG_NAME: ${{ inputs.defconfig }}
       run: |
+        ccache -z
+
         LTO_FLAG=""
         [ "$LTO_MODE" != "none" ] && LTO_FLAG="LTO=$LTO_MODE"
-        WARN_FLAGS="-Wno-error -Wno-implicit-int -Wno-strict-prototypes -Wno-implicit-function-declaration"
-        MAKE_ARGS="O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- $LTO_FLAG $EXTRA_ARGS"
-        make $MAKE_ARGS KCFLAGS="$WARN_FLAGS" "$DEFCONFIG_NAME"
-        make $MAKE_ARGS KCFLAGS="$WARN_FLAGS" -j$(nproc --all)
 
+        WARN_FLAGS="-Wno-error -Wno-implicit-int -Wno-strict-prototypes -Wno-implicit-function-declaration"
+
+        MAKE_ARGS="O=$OUT_DIR ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+          CROSS_COMPILE=aarch64-linux-gnu- \
+          $LTO_FLAG $EXTRA_ARGS \
+          CC='ccache clang' \
+          AR=llvm-ar AS=llvm-as NM=llvm-nm \
+          OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
+          KBUILD_BUILD_USER=rtwo-builder \
+          KBUILD_BUILD_HOST=github-actions"
+
+        eval make $MAKE_ARGS KCFLAGS="$WARN_FLAGS" "$DEFCONFIG_NAME"
+        eval make $MAKE_ARGS KCFLAGS="$WARN_FLAGS" -j$(nproc --all)
+
+        ccache -s
+
+    # ── 20. Save ccache ─────────────────────────────────────
+    - name: Save ccache
+      uses: actions/cache/save@v4
+      if: always()
+      with:
+        path: ${{ github.workspace }}/.ccache
+        key: ccache-rtwo-${{ inputs.ksu_variant }}-${{ inputs.clang_compiler }}-${{ github.sha }}
+
+    # ── 21. Pack AnyKernel3 ──────────────────────────────────
     - name: Prepare AnyKernel3
       env:
         IMAGE_NAME: ${{ inputs.kernel_image_name }}
       run: |
-        IMAGE_PATH="kernel_source/out/arch/arm64/boot/${IMAGE_NAME}"
+        IMAGE_PATH="kernel_source/$OUT_DIR/arch/arm64/boot/${IMAGE_NAME}"
+        if [ ! -f "$IMAGE_PATH" ]; then
+          echo "::error::Kernel image not found at $IMAGE_PATH"
+          echo "Available boot files:"
+          ls -la "kernel_source/$OUT_DIR/arch/arm64/boot/" 2>/dev/null || echo "(directory missing)"
+          exit 1
+        fi
+
         cp "$IMAGE_PATH" AnyKernel3/
         mkdir -p AnyKernel3/dtbs
-        find kernel_source/out/arch/arm64/boot/dts -name "*.dtb" -exec cp {} AnyKernel3/dtbs/ \;
+        find "kernel_source/$OUT_DIR/arch/arm64/boot/dts" \
+          -name "*.dtb" -exec cp {} AnyKernel3/dtbs/ \; 2>/dev/null || true
 
-    - name: Upload Artifact
+    # ── 22. Scan patch rejects ───────────────────────────────
+    - name: Scan Patch Rejects
+      if: always()
+      run: |
+        REJECTS_DIR="$GITHUB_WORKSPACE/patch-rejects"
+        mkdir -p "$REJECTS_DIR"
+        mapfile -t REJS < <(find kernel_source -type f -name '*.rej')
+        REJ_COUNT=${#REJS[@]}
+        echo "REJ_COUNT=$REJ_COUNT" >> "$GITHUB_ENV"
+        if [ "$REJ_COUNT" -gt 0 ]; then
+          echo "::warning::$REJ_COUNT patch reject(s) found!"
+          for REJ in "${REJS[@]}"; do
+            REL="${REJ#kernel_source/}"
+            DEST="$REJECTS_DIR/$REL"
+            mkdir -p "$(dirname "$DEST")"
+            cp "$REJ" "$DEST"
+            ORIG="${REJ%.rej}"
+            [ -f "$ORIG" ] && cp "$ORIG" "$REJECTS_DIR/${REL%.rej}"
+          done
+        fi
+
+    # ── 23. Upload AnyKernel3 ZIP ────────────────────────────
+    - name: Upload AnyKernel3
       uses: actions/upload-artifact@v4
       with:
-        name: ${{ env.FILE_NAME }}-AnyKernel3
+        name: ${{ env.FILE_NAME }}-${{ env.BUILD_TIME }}-AnyKernel3
         path: ./AnyKernel3/**
+        if-no-files-found: error
         compression-level: 9
+        retention-days: 30
+
+    # ── 24. Upload patch rejects ─────────────────────────────
+    - name: Upload Patch Rejects
+      if: always() && env.REJ_COUNT > 0
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ env.FILE_NAME }}-Rejects
+        path: patch-rejects/
+        if-no-files-found: ignore
+        compression-level: 9
+
+    # ── 25. Job Summary ──────────────────────────────────────
+    - name: Job Summary
+      if: always()
+      env:
+        ADD_SUSFS:   ${{ inputs.add_susfs }}
+        ADD_KPM:     ${{ inputs.add_kpm }}
+        KSU_VARIANT: ${{ inputs.ksu_variant }}
+        CLANG:       ${{ inputs.clang_compiler }}
+        LTO:         ${{ inputs.lto_mode }}
+        REPO:        ${{ inputs.kernel_repo }}
+        BRANCH:      ${{ inputs.kernel_branch }}
+        IMAGE:       ${{ inputs.kernel_image_name }}
+      run: |
+        S() { [[ "$1" == "true" ]] && echo "✅ Enabled" || echo "❌ Disabled"; }
+        {
+          echo "## 🏗️ Universal Kernel Build — rtwo (android13-5.15)"
+          echo ""
+          echo "| Property | Value |"
+          echo "|----------|-------|"
+          echo "| **Device** | rtwo |"
+          echo "| **KMI** | android13-5.15 |"
+          echo "| **Source** | ${REPO} |"
+          echo "| **Branch** | ${BRANCH} |"
+          echo "| **Kernel** | ${FULL_VERSION} |"
+          echo "| **KSU Variant** | ${KSU_VARIANT} |"
+          echo "| **SUSFS** | $(S "$ADD_SUSFS") |"
+          echo "| **SUSFS Branch** | ${SUSFS_BRANCH:-N/A} |"
+          echo "| **KPM** | $(S "$ADD_KPM") |"
+          echo "| **Clang** | ${CLANG} |"
+          echo "| **LTO** | ${LTO} |"
+          echo "| **Image** | ${IMAGE} |"
+          echo "| **Patch Rejects** | ${REJ_COUNT:-0} |"
+          echo "| **Artifact** | ${FILE_NAME:-N/A} |"
+          echo "| **Build Time** | ${BUILD_TIME} |"
+        } >> "$GITHUB_STEP_SUMMARY"

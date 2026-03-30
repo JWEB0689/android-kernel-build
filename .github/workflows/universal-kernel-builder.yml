@@ -2,11 +2,11 @@ name: Universal Kernel Builder — rtwo
 
 # ─────────────────────────────────────────────────────────────
 #  Merges the best features from all four reference workflows:
-#  • build.yml          → custom clang picker, ccache, swap, private-repo
-#  • kernel-user-git    → KSU setup scripts, defconfig pruning, ABI bypass,
+#   → custom clang picker, ccache, swap, private-repo
+#   → KSU setup scripts, defconfig pruning, ABI bypass,
 #                         dirty-suffix removal, reject scanner, Job Summary
-#  • universal-builder  → KSU fork overlay, SUSFS auto-detect, KPM toggle
-#  • Build Kernel OnePlus → KSU APK bundling, SUSFS module (CI/Release),
+#   → KSU fork overlay, SUSFS auto-detect, KPM toggle
+#   → KSU APK bundling, SUSFS module (CI/Release),
 #                           BBR+ECN, KPM patch_linux binary patching,
 #                           TMPFS_POSIX_ACL config
 #
@@ -167,7 +167,6 @@ jobs:
       DEVICE:   rtwo
       KMI:      android13-5.15
       OUT_DIR:  out
-      # Opt into Node.js 24 for all JS actions (avoids deprecation warnings)
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:

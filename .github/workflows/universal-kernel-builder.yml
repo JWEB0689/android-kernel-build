@@ -10,7 +10,11 @@ name: Universal Kernel Builder — rtwo
 #                           BBR+ECN, KPM patch_linux binary patching,
 #                           TMPFS_POSIX_ACL config
 #
-#  Extra: zeromount module (Enginex0/zeromount) bundled into AnyKernel3 ZIP
+#  Extras:
+#  • zeromount module (Enginex0/zeromount) bundled into AnyKernel3 ZIP
+#  • NoMount kernel patch (maxsteeel/nomount) as alternative to plain SUSFS
+#    — uses the combined nomount-susfs-kernel-5.15.patch for zero-mount
+#      injection at the VFS layer (no /proc/mounts pollution)
 #
 #  Hard-coded defaults for: device=rtwo  kmi=android13-5.15
 # ─────────────────────────────────────────────────────────────
@@ -56,13 +60,21 @@ on:
           - None
         default: SukiSU
 
-      # ── SUSFS ─────────────────────────────────────────────
-      add_susfs:
-        description: "Add SUSFS patches"
-        type: boolean
-        default: true
+      # ── SUSFS / NoMount mode ───────────────────────────────
+      # SUSFS_only   → apply standard ShirkNeko SUSFS patch (50_ + 10_)
+      # NoMount_SUSFS → apply maxsteeel's combined nomount-susfs-5.15.patch
+      #                 (zero mount table entries + SUSFS hiding; beta)
+      # None         → no SUSFS/NoMount patching at all
+      susfs_mode:
+        description: "SUSFS mode"
+        type: choice
+        options:
+          - SUSFS_only
+          - NoMount_SUSFS
+          - None
+        default: SUSFS_only
       susfs_branch:
-        description: "SUSFS branch override (auto-detect if blank)"
+        description: "SUSFS branch override for SUSFS_only mode (auto-detect if blank)"
         type: string
         default: "gki-android13-5.15"
       susfs_module:
@@ -147,7 +159,7 @@ on:
 
 jobs:
   build:
-    name: "Build [${{ inputs.ksu_variant }}] [${{ inputs.clang_compiler }}]"
+    name: "[${{ inputs.susfs_mode }}] [${{ inputs.ksu_variant }}] [${{ inputs.clang_compiler }}]"
     runs-on: ubuntu-latest
     timeout-minutes: 150
 
@@ -217,16 +229,11 @@ jobs:
         }
 
         case "${{ inputs.clang_compiler }}" in
-          "ZyC Clang")
-            clang_url=$(get_latest_github_release "ZyCromerZ/Clang") ;;
-          "Greenforce Clang")
-            clang_url=$(get_latest_github_release "greenforce-project/greenforce_clang") ;;
-          "WeebX Clang")
-            clang_url=$(get_latest_github_release "XSans0/WeebX-Clang") ;;
-          "SuperRyzen Clang")
-            clang_url="https://gitlab.com/TianWalkzzMiku/SuperRyzen-Clang/" ;;
-          *)
-            echo "❌ Unsupported compiler: ${{ inputs.clang_compiler }}"; exit 1 ;;
+          "ZyC Clang")        clang_url=$(get_latest_github_release "ZyCromerZ/Clang") ;;
+          "Greenforce Clang") clang_url=$(get_latest_github_release "greenforce-project/greenforce_clang") ;;
+          "WeebX Clang")      clang_url=$(get_latest_github_release "XSans0/WeebX-Clang") ;;
+          "SuperRyzen Clang") clang_url="https://gitlab.com/TianWalkzzMiku/SuperRyzen-Clang/" ;;
+          *) echo "❌ Unsupported compiler: ${{ inputs.clang_compiler }}"; exit 1 ;;
         esac
 
         echo "✅ Clang source: $clang_url"
@@ -248,7 +255,6 @@ jobs:
         fi
 
         [ ! -f "$CLANG_PATH/clang" ] && { echo "❌ clang binary not found in $CLANG_PATH"; ls -R clang; exit 1; }
-
         echo "✅ Using Clang from $CLANG_PATH"
         echo "CLANG_PATH=$CLANG_PATH" >> "$GITHUB_ENV"
         echo "$CLANG_PATH" >> "$GITHUB_PATH"
@@ -321,7 +327,6 @@ jobs:
       run: |
         DEFCONFIG="arch/arm64/configs/${{ inputs.defconfig }}"
         echo "CONFIG_LOCALVERSION=\"${{ inputs.local_version }}\"" >> "$DEFCONFIG"
-        echo "✅ Set CONFIG_LOCALVERSION=${{ inputs.local_version }}"
 
     # ── 9. Remove -dirty suffix ─────────────────────────────
     - name: Remove Dirty Suffix
@@ -339,9 +344,40 @@ jobs:
         scripts/config --file "arch/arm64/configs/${{ inputs.defconfig }}" \
           -d TRIM_UNUSED_KSYMS 2>/dev/null || true
 
-    # ── 11. Resolve SUSFS branch ─────────────────────────────
-    - name: Resolve SUSFS Branch
-      if: inputs.add_susfs && inputs.ksu_variant != 'None'
+    # ── 11. Setup KernelSU ──────────────────────────────────
+    - name: Setup KernelSU
+      if: inputs.ksu_variant != 'None'
+      working-directory: kernel_source
+      env:
+        KSU_VARIANT: ${{ inputs.ksu_variant }}
+      run: |
+        rm -rf KernelSU KernelSU-Next Wild_KSU drivers/kernelsu
+
+        case "$KSU_VARIANT" in
+          Tiann)
+            curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -
+            echo "KSU_DIR=KernelSU" >> "$GITHUB_ENV" ;;
+          SukiSU)
+            curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
+            echo "KSU_DIR=KernelSU" >> "$GITHUB_ENV" ;;
+          ReSukiSU)
+            curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s susfs-ksud
+            echo "KSU_DIR=KernelSU" >> "$GITHUB_ENV" ;;
+          KernelSU-Next)
+            curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/stable/kernel/setup.sh" | bash -s stable
+            echo "KSU_DIR=KernelSU-Next" >> "$GITHUB_ENV" ;;
+          WKSU)
+            curl -LSs "https://raw.githubusercontent.com/WildKernels/Wild_KSU/stable/kernel/setup.sh" | bash -s canary
+            echo "KSU_DIR=Wild_KSU" >> "$GITHUB_ENV" ;;
+        esac
+
+    # ════════════════════════════════════════════════════════
+    # SUSFS MODE: SUSFS_only
+    # Standard path: ShirkNeko SUSFS (50_ kernel patch + 10_ KSU patch)
+    # ════════════════════════════════════════════════════════
+
+    - name: "[SUSFS_only] Resolve SUSFS Branch"
+      if: inputs.susfs_mode == 'SUSFS_only' && inputs.ksu_variant != 'None'
       env:
         OVERRIDE: ${{ inputs.susfs_branch }}
       run: |
@@ -355,7 +391,7 @@ jobs:
           CANDIDATE="gki-${AV}-${KERNEL_VER}"
           if git ls-remote --heads "$SUSFS_REPO" "$CANDIDATE" 2>/dev/null | grep -q .; then
             echo "SUSFS_BRANCH=$CANDIDATE" >> "$GITHUB_ENV"
-            echo "Auto-resolved SUSFS branch: $CANDIDATE"
+            echo "Auto-resolved: $CANDIDATE"
             exit 0
           fi
         done
@@ -368,55 +404,14 @@ jobs:
         echo "::error::No SUSFS branch found for kernel ${KERNEL_VER}. Set susfs_branch manually."
         exit 1
 
-    # ── 12. Clone SUSFS patches ──────────────────────────────
-    - name: Clone SUSFS Patches
-      if: inputs.add_susfs && inputs.ksu_variant != 'None'
+    - name: "[SUSFS_only] Clone SUSFS Patches"
+      if: inputs.susfs_mode == 'SUSFS_only' && inputs.ksu_variant != 'None'
       run: |
         git clone --depth=1 --branch "$SUSFS_BRANCH" \
           https://github.com/ShirkNeko/susfs4ksu.git susfs_patches
 
-    # ── 13. Clone AnyKernel3 ────────────────────────────────
-    - name: Clone AnyKernel3
-      run: |
-        git clone --depth=1 --branch "${{ inputs.anykernel_branch }}" \
-          https://github.com/WildKernels/AnyKernel3.git AnyKernel3
-        rm -rf AnyKernel3/.git
-
-    # ── 14. Setup KernelSU ──────────────────────────────────
-    - name: Setup KernelSU
-      if: inputs.ksu_variant != 'None'
-      working-directory: kernel_source
-      env:
-        KSU_VARIANT: ${{ inputs.ksu_variant }}
-      run: |
-        rm -rf KernelSU KernelSU-Next Wild_KSU drivers/kernelsu
-
-        case "$KSU_VARIANT" in
-          Tiann)
-            curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -
-            echo "KSU_DIR=KernelSU" >> "$GITHUB_ENV"
-            ;;
-          SukiSU)
-            curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
-            echo "KSU_DIR=KernelSU" >> "$GITHUB_ENV"
-            ;;
-          ReSukiSU)
-            curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s susfs-ksud
-            echo "KSU_DIR=KernelSU" >> "$GITHUB_ENV"
-            ;;
-          KernelSU-Next)
-            curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/stable/kernel/setup.sh" | bash -s stable
-            echo "KSU_DIR=KernelSU-Next" >> "$GITHUB_ENV"
-            ;;
-          WKSU)
-            curl -LSs "https://raw.githubusercontent.com/WildKernels/Wild_KSU/stable/kernel/setup.sh" | bash -s canary
-            echo "KSU_DIR=Wild_KSU" >> "$GITHUB_ENV"
-            ;;
-        esac
-
-    # ── 15. Apply upstream SUSFS patch ──────────────────────
-    - name: Apply Upstream SUSFS Patch
-      if: inputs.add_susfs && inputs.ksu_variant != 'None'
+    - name: "[SUSFS_only] Apply Upstream SUSFS Patch (50_)"
+      if: inputs.susfs_mode == 'SUSFS_only' && inputs.ksu_variant != 'None'
       working-directory: kernel_source
       run: |
         PATCH=$(find "$GITHUB_WORKSPACE/susfs_patches/kernel_patches" \
@@ -425,35 +420,66 @@ jobs:
         echo "Applying: $(basename "$PATCH")"
         patch -p1 -F3 --no-backup-if-mismatch < "$PATCH" || true
 
-    # ── 16. Copy SUSFS source files ──────────────────────────
-    - name: Copy SUSFS Source Files
-      if: inputs.add_susfs && inputs.ksu_variant != 'None'
+    - name: "[SUSFS_only] Copy SUSFS Source Files"
+      if: inputs.susfs_mode == 'SUSFS_only' && inputs.ksu_variant != 'None'
       working-directory: kernel_source
       run: |
         mkdir -p fs include/linux
         cp -r "$GITHUB_WORKSPACE/susfs_patches/kernel_patches/fs/"* fs/ 2>/dev/null || true
         cp -r "$GITHUB_WORKSPACE/susfs_patches/kernel_patches/include/linux/"* include/linux/ 2>/dev/null || true
 
-    # ── 17. Apply KSU-side SUSFS patch ──────────────────────
-    - name: Apply KSU-side SUSFS Patch
-      if: inputs.add_susfs && inputs.ksu_variant != 'None'
+    - name: "[SUSFS_only] Apply KSU-side SUSFS Patch (10_)"
+      if: inputs.susfs_mode == 'SUSFS_only' && inputs.ksu_variant != 'None'
       run: |
         cd "kernel_source/$KSU_DIR"
         if grep -rq 'config KSU_SUSFS' kernel/Kconfig 2>/dev/null; then
-          echo "SUSFS already integrated in $KSU_DIR — skipping 10_ patch"
+          echo "SUSFS already integrated — skipping 10_ patch"
           exit 0
         fi
         KSU_PATCH=$(find "$GITHUB_WORKSPACE/susfs_patches/kernel_patches/KernelSU" \
           -name '10_enable_susfs_for_ksu.patch' 2>/dev/null | head -1)
         [ -z "$KSU_PATCH" ] && { echo "::warning::No 10_ KSU patch found, skipping"; exit 0; }
         patch -p1 -F3 --no-backup-if-mismatch < "$KSU_PATCH" || \
-          echo "::warning::10_ patch soft-failed — SUSFS Kconfig may be pruned"
+          echo "::warning::10_ patch soft-failed"
 
-    # ── 18. Configure defconfig ──────────────────────────────
+    # ════════════════════════════════════════════════════════
+    # SUSFS MODE: NoMount_SUSFS
+    # Uses maxsteeel/nomount combined patch for kernel 5.15
+    # This replaces ALL standard SUSFS steps above with a
+    # single unified VFS-layer patch — zero mount table entries.
+    # ════════════════════════════════════════════════════════
+
+    - name: "[NoMount_SUSFS] Clone NoMount Repo"
+      if: inputs.susfs_mode == 'NoMount_SUSFS' && inputs.ksu_variant != 'None'
+      run: |
+        echo "🔩 Cloning maxsteeel/nomount..."
+        git clone --depth=1 https://github.com/maxsteeel/nomount.git nomount_repo
+        # Confirm the 5.15 combined patch is present
+        PATCH="nomount_repo/patches/nomount-susfs-kernel-5.15.patch"
+        [ -f "$PATCH" ] && echo "✅ Found: $PATCH" || \
+          { echo "::error::nomount-susfs-kernel-5.15.patch not found in repo — check upstream"; exit 1; }
+
+    - name: "[NoMount_SUSFS] Apply Combined NoMount+SUSFS Patch"
+      if: inputs.susfs_mode == 'NoMount_SUSFS' && inputs.ksu_variant != 'None'
+      working-directory: kernel_source
+      run: |
+        PATCH="$GITHUB_WORKSPACE/nomount_repo/patches/nomount-susfs-kernel-5.15.patch"
+        echo "🔩 Applying nomount-susfs-kernel-5.15.patch (fuzz=10)..."
+        # --fuzz=10 recommended by upstream for out-of-tree kernels
+        patch -p1 --fuzz=10 --no-backup-if-mismatch < "$PATCH" || {
+          echo "::warning::Patch applied with warnings — check for .rej files"
+        }
+        echo "NOMOUNT_APPLIED=true" >> "$GITHUB_ENV"
+        echo "✅ NoMount+SUSFS patch applied"
+
+    # ════════════════════════════════════════════════════════
+    # DEFCONFIG — runs after whichever patch mode was chosen
+    # ════════════════════════════════════════════════════════
+
     - name: Configure Defconfig
       working-directory: kernel_source
       env:
-        ADD_SUSFS:      ${{ inputs.add_susfs }}
+        SUSFS_MODE:     ${{ inputs.susfs_mode }}
         ADD_KPM:        ${{ inputs.add_kpm }}
         ENABLE_BBR:     ${{ inputs.enable_bbr }}
         KSU_VARIANT:    ${{ inputs.ksu_variant }}
@@ -474,8 +500,8 @@ jobs:
         # ── KPM ──
         [ "$ADD_KPM" = "true" ] && echo "CONFIG_KPM=y" >> "$DEFCONFIG_PATH"
 
-        # ── SUSFS ──
-        if [ "$ADD_SUSFS" = "true" ] && [ "$KSU_VARIANT" != "None" ]; then
+        # ── SUSFS configs (both modes write same KSU_SUSFS flags) ──
+        if [ "$SUSFS_MODE" != "None" ] && [ "$KSU_VARIANT" != "None" ]; then
           cat >> "$DEFCONFIG_PATH" <<'KCONFIG'
         CONFIG_KSU_SUSFS=y
         CONFIG_KSU_SUSFS_SUS_PATH=y
@@ -496,6 +522,13 @@ jobs:
         CONFIG_KSU_SUSFS_HIDDEN_NAME=y
         CONFIG_KSU_SUSFS_HARDENED=y
         KCONFIG
+        fi
+
+        # ── NoMount subsystem (only when NoMount_SUSFS mode) ──
+        # CONFIG_NOMOUNT enables the VFS-layer injection engine
+        if [ "$SUSFS_MODE" = "NoMount_SUSFS" ] && [ "$KSU_VARIANT" != "None" ]; then
+          echo "CONFIG_NOMOUNT=y" >> "$DEFCONFIG_PATH"
+          echo "✅ CONFIG_NOMOUNT=y added"
         fi
 
         # ── TMPFS ──
@@ -530,7 +563,7 @@ jobs:
           sed -i '/^CONFIG_KSU_SUSFS_/d' "$DEFCONFIG_PATH"
         fi
 
-    # ── 19. Build kernel ────────────────────────────────────
+    # ── Build kernel ────────────────────────────────────────
     - name: Build Kernel
       working-directory: kernel_source
       env:
@@ -559,7 +592,7 @@ jobs:
 
         ccache -s
 
-    # ── 20. Save ccache ─────────────────────────────────────
+    # ── Save ccache ─────────────────────────────────────────
     - name: Save ccache
       uses: actions/cache/save@v4
       if: always()
@@ -567,7 +600,7 @@ jobs:
         path: ${{ github.workspace }}/.ccache
         key: ccache-rtwo-${{ inputs.ksu_variant }}-${{ inputs.clang_compiler }}-${{ github.sha }}
 
-    # ── 21. KPM – patch_linux binary patching ───────────────
+    # ── KPM – patch_linux binary patching ───────────────────
     - name: Apply KPM patch_linux to Image
       if: inputs.add_kpm
       run: |
@@ -582,13 +615,13 @@ jobs:
           cd "$(dirname "$IMAGE_PATH")"
           "$GITHUB_WORKSPACE/$PATCH_BIN"
           [ -f oImage ] && mv oImage "${{ inputs.kernel_image_name }}" && \
-            echo "✅ KPM patch_linux applied successfully" || \
-            echo "::warning::patch_linux did not produce oImage, using original Image"
+            echo "✅ KPM patch_linux applied" || \
+            echo "::warning::patch_linux did not produce oImage, using original"
         else
-          echo "::warning::patch_linux binary not found in SukiSU_patch/kpm/, skipping"
+          echo "::warning::patch_linux binary not found, skipping"
         fi
 
-    # ── 22. Pack AnyKernel3 ──────────────────────────────────
+    # ── Pack AnyKernel3 ──────────────────────────────────────
     - name: Prepare AnyKernel3
       env:
         IMAGE_NAME: ${{ inputs.kernel_image_name }}
@@ -596,61 +629,49 @@ jobs:
         IMAGE_PATH="kernel_source/$OUT_DIR/arch/arm64/boot/${IMAGE_NAME}"
         if [ ! -f "$IMAGE_PATH" ]; then
           echo "::error::Kernel image not found at $IMAGE_PATH"
-          ls -la "kernel_source/$OUT_DIR/arch/arm64/boot/" 2>/dev/null || echo "(directory missing)"
+          ls -la "kernel_source/$OUT_DIR/arch/arm64/boot/" 2>/dev/null || true
           exit 1
         fi
+
+        git clone --depth=1 --branch "${{ inputs.anykernel_branch }}" \
+          https://github.com/WildKernels/AnyKernel3.git AnyKernel3
+        rm -rf AnyKernel3/.git
 
         cp "$IMAGE_PATH" AnyKernel3/
         mkdir -p AnyKernel3/dtbs
         find "kernel_source/$OUT_DIR/arch/arm64/boot/dts" \
           -name "*.dtb" -exec cp {} AnyKernel3/dtbs/ \; 2>/dev/null || true
 
-    # ── 23. Bundle SUSFS module (Release) ────────────────────
+    # ── Bundle SUSFS module (Release) ────────────────────────
     - name: Download SUSFS Module (Release)
-      if: inputs.susfs_module == 'Release' && inputs.add_susfs && inputs.ksu_variant != 'None'
+      if: inputs.susfs_module == 'Release' && inputs.susfs_mode != 'None' && inputs.ksu_variant != 'None'
       continue-on-error: true
       run: |
-        echo "📦 Downloading SUSFS module from Release..."
         wget -q -O ksu_module_susfs.zip \
           https://github.com/sidex15/ksu_module_susfs/releases/latest/download/ksu_module_susfs_1.5.2+.zip
-        if [ -f ksu_module_susfs.zip ]; then
-          cp ksu_module_susfs.zip AnyKernel3/
-          echo "✅ SUSFS module (Release) added to AnyKernel3"
-        else
-          echo "::warning::SUSFS Release module download failed"
-        fi
+        [ -f ksu_module_susfs.zip ] && cp ksu_module_susfs.zip AnyKernel3/ && \
+          echo "✅ SUSFS module (Release) added" || echo "::warning::SUSFS Release download failed"
 
-    # ── 24. Bundle SUSFS module (CI) ─────────────────────────
+    # ── Bundle SUSFS module (CI) ─────────────────────────────
     - name: Download SUSFS Module (CI)
-      if: inputs.susfs_module == 'CI' && inputs.add_susfs && inputs.ksu_variant != 'None'
+      if: inputs.susfs_module == 'CI' && inputs.susfs_mode != 'None' && inputs.ksu_variant != 'None'
       continue-on-error: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
-        echo "📦 Fetching latest SUSFS CI artifact..."
         LATEST_RUN_ID=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
           "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs?status=success" | \
           jq -r '.workflow_runs[] | select(.head_branch == "v1.5.2+") | .id' | head -n 1)
-
-        if [ -z "$LATEST_RUN_ID" ]; then
-          echo "::warning::No successful SUSFS CI run found for branch v1.5.2+"
-          exit 0
-        fi
-
+        [ -z "$LATEST_RUN_ID" ] && { echo "::warning::No SUSFS CI run found"; exit 0; }
         ARTIFACT_URL=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
           "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs/$LATEST_RUN_ID/artifacts" | \
           jq -r '.artifacts[0].archive_download_url')
+        [ -n "$ARTIFACT_URL" ] && \
+          curl -fL -H "Authorization: Bearer $GITHUB_TOKEN" -o ksu_module_susfs_CI.zip "$ARTIFACT_URL" && \
+          cp ksu_module_susfs_CI.zip AnyKernel3/ && echo "✅ SUSFS module (CI) added" || \
+          echo "::warning::SUSFS CI artifact fetch failed"
 
-        if [ -n "$ARTIFACT_URL" ]; then
-          curl -fL -H "Authorization: Bearer $GITHUB_TOKEN" \
-            -o ksu_module_susfs_CI.zip "$ARTIFACT_URL"
-          cp ksu_module_susfs_CI.zip AnyKernel3/
-          echo "✅ SUSFS module (CI) added to AnyKernel3"
-        else
-          echo "::warning::Failed to locate SUSFS CI artifact URL"
-        fi
-
-    # ── 25. Bundle KernelSU Manager APK ─────────────────────
+    # ── Bundle KernelSU Manager APK ─────────────────────────
     - name: Download KernelSU Manager APK
       if: inputs.bundle_ksu_apk && inputs.ksu_variant != 'None'
       continue-on-error: true
@@ -659,21 +680,17 @@ jobs:
         KSU_VARIANT:  ${{ inputs.ksu_variant }}
         APK_ARTIFACT: ${{ inputs.ksu_apk_variant }}
       run: |
-        echo "📱 Fetching KSU Manager APK for $KSU_VARIANT..."
-
         download_sukisu_apk() {
-          local branch="$1"
-          local artifact="$2"
+          local branch="$1" artifact="$2"
           run_id=$(gh api \
             "repos/SukiSU-Ultra/SukiSU-Ultra/actions/workflows/build-manager.yml/runs?branch=${branch}&status=success&per_page=1" \
             --jq '.workflow_runs[0].id' 2>/dev/null || echo "")
-          [ -z "$run_id" ] && { echo "::warning::No successful SukiSU build run on branch $branch"; return 1; }
+          [ -z "$run_id" ] && { echo "::warning::No SukiSU build on $branch"; return 1; }
           artifact_url=$(gh api "repos/SukiSU-Ultra/SukiSU-Ultra/actions/runs/$run_id/artifacts" | \
             jq -r ".artifacts[] | select(.name == \"$artifact\") | .archive_download_url" | head -n1)
           [ -z "$artifact_url" ] && { echo "::warning::Artifact '$artifact' not found"; return 1; }
-          curl -fL -H "Authorization: token $GITHUB_TOKEN" -o "KSU_Manager.zip" "$artifact_url"
-          unzip -j KSU_Manager.zip "*.apk" -d AnyKernel3/ && \
-            echo "✅ SukiSU APK ($artifact) added to AnyKernel3"
+          curl -fL -H "Authorization: token $GITHUB_TOKEN" -o KSU_Manager.zip "$artifact_url"
+          unzip -j KSU_Manager.zip "*.apk" -d AnyKernel3/ && echo "✅ SukiSU APK ($artifact) added"
         }
 
         case "$KSU_VARIANT" in
@@ -683,60 +700,34 @@ jobs:
             APK_URL=$(curl -sL "https://api.github.com/repos/tiann/KernelSU/releases/latest" | \
               jq -r '.assets[] | select(.name | endswith(".apk")) | .browser_download_url' | head -n1)
             [ -n "$APK_URL" ] && wget -q -O AnyKernel3/KernelSU.apk "$APK_URL" && \
-              echo "✅ Tiann KernelSU APK added" || echo "::warning::Tiann APK not found"
-            ;;
+              echo "✅ Tiann APK added" || echo "::warning::Tiann APK not found" ;;
           KernelSU-Next)
             APK_URL=$(curl -sL "https://api.github.com/repos/KernelSU-Next/KernelSU-Next/releases/latest" | \
               jq -r '.assets[] | select(.name | endswith(".apk")) | .browser_download_url' | head -n1)
             [ -n "$APK_URL" ] && wget -q -O AnyKernel3/KernelSU-Next.apk "$APK_URL" && \
-              echo "✅ KernelSU-Next APK added" || echo "::warning::KernelSU-Next APK not found"
-            ;;
-          WKSU) echo "::warning::No automated APK source for WKSU, skipping" ;;
+              echo "✅ KernelSU-Next APK added" || echo "::warning::KernelSU-Next APK not found" ;;
+          WKSU) echo "::warning::No automated APK for WKSU, skipping" ;;
         esac
 
-    # ── 26. Bundle Zeromount module ──────────────────────────
-    # zeromount is a KernelSU/Magisk module that eliminates bind-mount
-    # detection vectors. It ships as a ready-to-flash ZIP with pre-built
-    # LKM binaries — no kernel source changes required.
-    # Source: https://github.com/Enginex0/zeromount
+    # ── Bundle Zeromount module ──────────────────────────────
     - name: Download Zeromount Module
       if: inputs.bundle_zeromount && inputs.ksu_variant != 'None'
       continue-on-error: true
       run: |
-        echo "🔒 Fetching latest Zeromount release..."
-
-        # Query the GitHub API for the latest release and find the non-debug zip
         DOWNLOAD_URL=$(curl -sL "https://api.github.com/repos/Enginex0/zeromount/releases/latest" | \
-          jq -r '.assets[] | select(.name | test("zeromount-.*\\.zip$")) | select(.name | contains("debug") | not) | .browser_download_url' | \
-          head -n1)
-
-        if [ -z "$DOWNLOAD_URL" ]; then
-          # Fallback: grab the first zip asset (could be debug build)
+          jq -r '.assets[] | select(.name | test("zeromount-.*\\.zip$")) | select(.name | contains("debug") | not) | .browser_download_url' | head -n1)
+        [ -z "$DOWNLOAD_URL" ] && \
           DOWNLOAD_URL=$(curl -sL "https://api.github.com/repos/Enginex0/zeromount/releases/latest" | \
-            jq -r '.assets[] | select(.name | endswith(".zip")) | .browser_download_url' | head -n1)
-        fi
+          jq -r '.assets[] | select(.name | endswith(".zip")) | .browser_download_url' | head -n1)
+        [ -z "$DOWNLOAD_URL" ] && { echo "::warning::Zeromount ZIP not found, skipping"; exit 0; }
 
-        if [ -z "$DOWNLOAD_URL" ]; then
-          echo "::warning::Could not find a zeromount release ZIP — skipping"
-          exit 0
-        fi
-
-        TAG=$(curl -sL "https://api.github.com/repos/Enginex0/zeromount/releases/latest" | \
-          jq -r '.tag_name')
-        FILENAME="zeromount-${TAG}.zip"
-
-        echo "⬇️  Downloading: $DOWNLOAD_URL"
-        wget -q -O "$FILENAME" "$DOWNLOAD_URL"
-
-        if [ -f "$FILENAME" ]; then
-          cp "$FILENAME" AnyKernel3/
-          echo "✅ Zeromount $TAG added to AnyKernel3"
-          echo "ZEROMOUNT_TAG=$TAG" >> "$GITHUB_ENV"
-        else
+        TAG=$(curl -sL "https://api.github.com/repos/Enginex0/zeromount/releases/latest" | jq -r '.tag_name')
+        wget -q -O "zeromount-${TAG}.zip" "$DOWNLOAD_URL"
+        [ -f "zeromount-${TAG}.zip" ] && cp "zeromount-${TAG}.zip" AnyKernel3/ && \
+          echo "✅ Zeromount $TAG added" && echo "ZEROMOUNT_TAG=$TAG" >> "$GITHUB_ENV" || \
           echo "::warning::Zeromount download failed"
-        fi
 
-    # ── 27. Scan patch rejects ───────────────────────────────
+    # ── Scan patch rejects ───────────────────────────────────
     - name: Scan Patch Rejects
       if: always()
       run: |
@@ -757,17 +748,17 @@ jobs:
           done
         fi
 
-    # ── 28. Upload AnyKernel3 ZIP ────────────────────────────
+    # ── Upload AnyKernel3 ZIP ────────────────────────────────
     - name: Upload AnyKernel3
       uses: actions/upload-artifact@v4
       with:
-        name: ${{ env.FILE_NAME }}-${{ env.BUILD_TIME }}-AnyKernel3
+        name: ${{ env.FILE_NAME }}-${{ inputs.susfs_mode }}-${{ env.BUILD_TIME }}-AnyKernel3
         path: ./AnyKernel3/**
         if-no-files-found: error
         compression-level: 9
         retention-days: 30
 
-    # ── 29. Upload patch rejects ─────────────────────────────
+    # ── Upload patch rejects ─────────────────────────────────
     - name: Upload Patch Rejects
       if: always() && env.REJ_COUNT > 0
       uses: actions/upload-artifact@v4
@@ -777,11 +768,11 @@ jobs:
         if-no-files-found: ignore
         compression-level: 9
 
-    # ── 30. Job Summary ──────────────────────────────────────
+    # ── Job Summary ──────────────────────────────────────────
     - name: Job Summary
       if: always()
       env:
-        ADD_SUSFS:        ${{ inputs.add_susfs }}
+        SUSFS_MODE:       ${{ inputs.susfs_mode }}
         ADD_KPM:          ${{ inputs.add_kpm }}
         ENABLE_BBR:       ${{ inputs.enable_bbr }}
         SUSFS_MODULE:     ${{ inputs.susfs_module }}
@@ -795,6 +786,12 @@ jobs:
         IMAGE:            ${{ inputs.kernel_image_name }}
       run: |
         S() { [[ "$1" == "true" ]] && echo "✅ Enabled" || echo "❌ Disabled"; }
+        MODE_LABEL=""
+        case "$SUSFS_MODE" in
+          SUSFS_only)   MODE_LABEL="✅ Standard SUSFS (ShirkNeko)" ;;
+          NoMount_SUSFS) MODE_LABEL="🔩 NoMount+SUSFS (maxsteeel) — VFS injection, zero mounts" ;;
+          None)         MODE_LABEL="❌ Disabled" ;;
+        esac
         {
           echo "## 🏗️ Universal Kernel Build — rtwo (android13-5.15)"
           echo ""
@@ -806,10 +803,10 @@ jobs:
           echo "| **Branch** | ${BRANCH} |"
           echo "| **Kernel** | ${FULL_VERSION} |"
           echo "| **KSU Variant** | ${KSU_VARIANT} |"
-          echo "| **SUSFS** | $(S "$ADD_SUSFS") |"
+          echo "| **SUSFS Mode** | ${MODE_LABEL} |"
           echo "| **SUSFS Branch** | ${SUSFS_BRANCH:-N/A} |"
           echo "| **SUSFS Module** | ${SUSFS_MODULE} |"
-          echo "| **KSU APK Bundled** | $(S "$BUNDLE_APK") |"
+          echo "| **KSU APK** | $(S "$BUNDLE_APK") |"
           echo "| **Zeromount** | $(S "$BUNDLE_ZEROMOUNT") ${ZEROMOUNT_TAG:-} |"
           echo "| **KPM** | $(S "$ADD_KPM") |"
           echo "| **BBR + ECN** | $(S "$ENABLE_BBR") |"

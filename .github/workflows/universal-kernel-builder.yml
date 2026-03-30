@@ -1,9 +1,7 @@
 name: Universal Kernel Builder — rtwo
 
 # ─────────────────────────────────────────────────────────────
-#  Merges the best features from all four reference workflows.
 #
-#  AnyKernel3 source: JWEB0689/AnyKernel3 (osm0sis fork)
 #  A custom anykernel.sh is generated at build time that uses
 #  TWRP/recovery volume-key prompts to ask the user:
 #    VOL+  = Yes / install     VOL-  = No / skip

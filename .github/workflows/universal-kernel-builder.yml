@@ -1,24 +1,5 @@
 name: Universal Kernel Builder — rtwo
 
-# ─────────────────────────────────────────────────────────────
-#  Merges the best features from all four reference workflows:
-#  • build.yml          → custom clang picker, ccache, swap, private-repo
-#  • kernel-user-git    → KSU setup scripts, defconfig pruning, ABI bypass,
-#                         dirty-suffix removal, reject scanner, Job Summary
-#  • universal-builder  → KSU fork overlay, SUSFS auto-detect, KPM toggle
-#  • Build Kernel OnePlus → KSU APK bundling, SUSFS module (CI/Release),
-#                           BBR+ECN, KPM patch_linux binary patching,
-#                           TMPFS_POSIX_ACL config
-#
-#  Extras:
-#  • zeromount module (Enginex0/zeromount) bundled into AnyKernel3 ZIP
-#  • NoMount kernel patch (maxsteeel/nomount) as alternative to plain SUSFS
-#    — uses the combined nomount-susfs-kernel-5.15.patch for zero-mount
-#      injection at the VFS layer (no /proc/mounts pollution)
-#
-#  Hard-coded defaults for: device=rtwo  kmi=android13-5.15
-# ─────────────────────────────────────────────────────────────
-
 permissions:
   contents: read
   actions: write

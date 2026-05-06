@@ -1,0 +1,312 @@
+name: Build User Kernel (Git)
+
+run-name: "Build ${{ inputs.kernel_branch }} @ ${{ inputs.kernel_repo }}"
+
+permissions:
+  contents: read
+  actions: write
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  SUSFS_REPO: https://github.com/ShirkNeko/susfs4ksu.git
+  ANYKERNEL_REPO: https://github.com/WildKernels/AnyKernel3.git
+  KSU_BASE_REPO: https://github.com/tiann/KernelSU.git
+  CCACHE_DIR: /home/runner/.cache/ccache
+  CCACHE_COMPRESS: "1"
+  CCACHE_MAXSIZE: 2G
+  GIT_LFS_SKIP_SMUDGE: "1"
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_repo:
+        description: "Kernel source git URL"
+        type: string
+        required: true
+      kernel_branch:
+        description: "Branch or tag to build"
+        type: string
+        required: true
+      defconfig:
+        description: "Defconfig name (relative to arch/arm64/configs/)"
+        type: string
+        required: true
+      ksu_fork:
+        description: "KernelSU fork to overlay"
+        type: choice
+        options:
+          - Tiann
+          - SukiSU
+          - ReSukiSU
+          - KernelSU-Next
+          - WKSU
+        default: Tiann
+      add_susfs:
+        description: "Add SUSFS support"
+        type: boolean
+        default: true
+      add_kpm:
+        description: "Add KPM support"
+        type: boolean
+        default: false
+      kernel_image_name:
+        description: "Output image name"
+        type: string
+        default: "Image"
+      anykernel_branch:
+        description: "AnyKernel3 branch"
+        type: string
+        default: "gki-2.0"
+      extra_make_args:
+        description: "Extra make arguments"
+        type: string
+        default: ""
+      lto_mode:
+        description: "LTO mode"
+        type: choice
+        options:
+          - thin
+          - full
+          - none
+        default: thin
+      susfs_branch:
+        description: "SUSFS branch override"
+        type: string
+        default: ""
+      artifact_retention_days:
+        description: "Artifact retention in days"
+        type: number
+        default: 7
+
+jobs:
+  build:
+    name: User Kernel Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Free Disk Space
+        uses: endersonmenezes/free-disk-space@v3
+        with:
+          remove_android: true
+          remove_dotnet: true
+          remove_haskell: true
+          remove_tool_cache: true
+          remove_swap: true
+          remove_packages: "azure-cli google-cloud-cli microsoft-edge-stable google-chrome-stable firefox postgresql* temurin-* *llvm* mysql* dotnet-sdk-*"
+          remove_packages_one_command: true
+          remove_folders: "/usr/share/swift /usr/share/miniconda /usr/share/az* /usr/local/lib/node_modules /usr/local/share/chromium /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle"
+          rm_cmd: "rmz"
+          rmz_version: "3.1.1"
+          testing: false
+
+      - name: Install Toolchain
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang lld llvm gcc-aarch64-linux-gnu binutils bc bison flex libssl-dev libelf-dev cpio kmod python3 python-is-python3 ccache
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ runner.os }}-${{ inputs.kernel_repo }}-${{ inputs.kernel_branch }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ inputs.kernel_repo }}-
+            ccache-${{ runner.os }}-
+
+      - name: Clone Kernel Source
+        env:
+          REPO: ${{ inputs.kernel_repo }}
+          BRANCH: ${{ inputs.kernel_branch }}
+        run: |
+          set -euo pipefail
+          git clone --depth=1 --branch "$BRANCH" "$REPO" kernel_source
+
+      - name: Detect Kernel Version
+        run: |
+          set -euo pipefail
+          cd kernel_source
+          VERSION=$(awk -F ' = ' '/^VERSION = /{print $2}' Makefile)
+          PATCHLEVEL=$(awk -F ' = ' '/^PATCHLEVEL = /{print $2}' Makefile)
+          SUBLEVEL=$(awk -F ' = ' '/^SUBLEVEL = /{print $2}' Makefile)
+          KERNEL_VER="${VERSION}.${PATCHLEVEL}"
+          SUB="${SUBLEVEL:-0}"
+          echo "KERNEL_VER=$KERNEL_VER" >> "$GITHUB_ENV"
+          echo "SUBLEVEL=$SUB" >> "$GITHUB_ENV"
+          echo "FULL_VERSION=${KERNEL_VER}.${SUB}" >> "$GITHUB_ENV"
+          echo "FILE_NAME=${KERNEL_VER}.${SUB}-UserKernel" >> "$GITHUB_ENV"
+
+      - name: Resolve SUSFS Branch
+        if: inputs.add_susfs
+        env:
+          OVERRIDE: ${{ inputs.susfs_branch }}
+        run: |
+          set -euo pipefail
+          if [ -n "$OVERRIDE" ]; then
+            echo "SUSFS_BRANCH=$OVERRIDE" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          for AV in android16 android15 android14 android13 android12; do
+            CANDIDATE="gki-${AV}-${KERNEL_VER}"
+            if git ls-remote --heads "$SUSFS_REPO" "$CANDIDATE" | grep -q .; then
+              echo "SUSFS_BRANCH=$CANDIDATE" >> "$GITHUB_ENV"
+              exit 0
+            fi
+          done
+          CANDIDATE="kernel-${KERNEL_VER}"
+          if git ls-remote --heads "$SUSFS_REPO" "$CANDIDATE" | grep -q .; then
+            echo "SUSFS_BRANCH=$CANDIDATE" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo "No matching SUSFS branch found" >&2
+          exit 1
+
+      - name: Clone SUSFS Patches
+        if: inputs.add_susfs
+        run: |
+          set -euo pipefail
+          git clone --depth=1 --branch "$SUSFS_BRANCH" "$SUSFS_REPO" susfs_patches
+
+      - name: Clone AnyKernel3
+        env:
+          AK_BRANCH: ${{ inputs.anykernel_branch }}
+        run: |
+          set -euo pipefail
+          git clone --depth=1 --branch "$AK_BRANCH" "$ANYKERNEL_REPO" AnyKernel3
+          rm -rf AnyKernel3/.git
+
+      - name: Clone Tiann KernelSU Base
+        run: |
+          set -euo pipefail
+          git clone --depth=1 "$KSU_BASE_REPO" KSU_BASE
+
+      - name: Apply SUSFS to Tiann Base
+        if: inputs.add_susfs
+        run: |
+          set -euo pipefail
+          cd KSU_BASE
+          PATCH=$(find "$GITHUB_WORKSPACE/susfs_patches/kernel_patches" -maxdepth 1 -name '50_add_susfs_in_*.patch' | head -1)
+          if [ -n "$PATCH" ]; then
+            patch -p1 -F3 --no-backup-if-mismatch < "$PATCH" || true
+          else
+            echo "SUSFS patch not found" >&2
+          fi
+
+      - name: Clone Selected Fork
+        run: |
+          set -euo pipefail
+          case "${{ inputs.ksu_fork }}" in
+            Tiann) ;;
+            SukiSU) git clone --depth=1 https://github.com/SukiSU-Ultra/SukiSU-Ultra.git KSU_FORK ;;
+            ReSukiSU) git clone --depth=1 https://github.com/ReSukiSU/ReSukiSU.git KSU_FORK ;;
+            KernelSU-Next) git clone --depth=1 https://github.com/KernelSU-Next/KernelSU-Next.git KSU_FORK ;;
+            WKSU) git clone --depth=1 https://github.com/WildKernels/Wild_KSU.git KSU_FORK ;;
+          esac
+
+      - name: Safe-Merge Fork Overlay
+        run: |
+          set -euo pipefail
+          if [ ! -d KSU_FORK ]; then
+            exit 0
+          fi
+          cd KSU_FORK
+          for DIR in core hook feature include manager policy; do
+            if [ -d "$DIR" ]; then
+              rsync -a --ignore-existing "$DIR/" "$GITHUB_WORKSPACE/KSU_BASE/$DIR/"
+            fi
+          done
+
+      - name: Auto-Detect KSU Injection Path
+        run: |
+          set -euo pipefail
+          cd kernel_source
+          if grep -Rqs "security/" .; then
+            TARGET="security/KernelSU"
+          elif grep -Rqs "kernel/" .; then
+            TARGET="kernel/KernelSU"
+          else
+            TARGET="KernelSU"
+          fi
+          echo "KSU_TARGET=$TARGET" >> "$GITHUB_ENV"
+
+      - name: Inject Merged KSU
+        run: |
+          set -euo pipefail
+          mkdir -p "kernel_source/${KSU_TARGET}"
+          rsync -a KSU_BASE/ "kernel_source/${KSU_TARGET}/"
+
+      - name: Configure Defconfig
+        working-directory: kernel_source
+        env:
+          ADD_SUSFS: ${{ inputs.add_susfs }}
+          ADD_KPM: ${{ inputs.add_kpm }}
+          DEFCONFIG_NAME: ${{ inputs.defconfig }}
+        run: |
+          set -euo pipefail
+          DEFCONFIG_PATH="arch/arm64/configs/${DEFCONFIG_NAME}"
+          if [ ! -f "$DEFCONFIG_PATH" ]; then
+            echo "Defconfig $DEFCONFIG_PATH not found" >&2
+            exit 1
+          fi
+
+          add_config() {
+            local cfg="$1"
+            if ! grep -q "^${cfg}$" "$DEFCONFIG_PATH"; then
+              echo "$cfg" >> "$DEFCONFIG_PATH"
+            fi
+          }
+
+          add_config "CONFIG_KSU=y"
+          add_config "CONFIG_KALLSYMS=y"
+          add_config "CONFIG_KALLSYMS_ALL=y"
+          if [ "$ADD_SUSFS" = "true" ]; then
+            add_config "CONFIG_KSU_SUSFS=y"
+          fi
+          if [ "$ADD_KPM" = "true" ]; then
+            add_config "CONFIG_KPM=y"
+          fi
+
+      - name: Build Kernel
+        working-directory: kernel_source
+        env:
+          LTO_MODE: ${{ inputs.lto_mode }}
+          EXTRA_ARGS: ${{ inputs.extra_make_args }}
+          DEFCONFIG_NAME: ${{ inputs.defconfig }}
+        run: |
+          set -euo pipefail
+          export PATH="/usr/lib/ccache:$PATH"
+          LTO_FLAG=""
+          [ "$LTO_MODE" != "none" ] && LTO_FLAG="LTO=$LTO_MODE"
+          WARN_FLAGS="-Wno-error -Wno-implicit-int -Wno-strict-prototypes -Wno-implicit-function-declaration"
+          MAKE_ARGS="O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- CC=clang LD=ld.lld $LTO_FLAG $EXTRA_ARGS"
+
+          make $MAKE_ARGS KCFLAGS="$WARN_FLAGS" "$DEFCONFIG_NAME"
+          MAKEFLAGS="-j$(nproc --all)" make $MAKE_ARGS KCFLAGS="$WARN_FLAGS"
+
+      - name: Prepare AnyKernel3
+        env:
+          IMAGE_NAME: ${{ inputs.kernel_image_name }}
+        run: |
+          set -euo pipefail
+          IMAGE_PATH="kernel_source/out/arch/arm64/boot/${IMAGE_NAME}"
+          if [ ! -f "$IMAGE_PATH" ]; then
+            echo "Kernel image not found at $IMAGE_PATH" >&2
+            exit 1
+          fi
+          cp "$IMAGE_PATH" AnyKernel3/
+          mkdir -p AnyKernel3/dtbs
+          find kernel_source/out/arch/arm64/boot/dts \( -name "*.dtb" -o -name "*.dtbo" \) -type f -exec cp {} AnyKernel3/dtbs/ \; || true
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.FILE_NAME }}-AnyKernel3
+          path: ./AnyKernel3/**
+          compression-level: 9
+          retention-days: ${{ inputs.artifact_retention_days }}

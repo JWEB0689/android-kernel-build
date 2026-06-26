@@ -1,0 +1,96 @@
+name: CI (Shell + Python)
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ─── Shellcheck ───
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+      - name: Run shellcheck
+        run: |
+          echo "## Shellcheck Results" >> $GITHUB_STEP_SUMMARY
+          find . -name "*.sh" -not -path "./.git/*" | xargs shellcheck -x 2>&1 | tee shellcheck.log || true
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat shellcheck.log >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+  # ─── Python Lint & Test ───
+  python-lint:
+    name: Python lint (scripts)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install ruff
+        run: pip install ruff
+      - name: Check format
+        run: |
+          find . -name "*.py" -not -path "./.git/*" | xargs ruff format --check 2>&1 | tee ruff-format.log || true
+      - name: Lint
+        run: |
+          find . -name "*.py" -not -path "./.git/*" | xargs ruff check 2>&1 | tee ruff.log || true
+      - name: Upload results
+        run: |
+          echo "## Python Lint Results" >> $GITHUB_STEP_SUMMARY
+          for f in ruff-format.log ruff.log; do
+            if [ -f "$f" ]; then
+              echo "### $f" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              cat "$f" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+
+  # ─── Security Scan ───
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check for dangerous patterns in shell scripts
+        run: |
+          echo "## Dangerous Patterns Check" >> $GITHUB_STEP_SUMMARY
+          DANGEROUS=$(grep -r -E "eval\b|exec\b|source.*\$\(|bash -c.*\$\(|curl.*\|.*bash|wget.*\|.*sh" --include="*.sh" . 2>/dev/null | head -20 || true)
+          if [ -n "$DANGEROUS" ]; then
+            echo "⚠️ Potentially dangerous patterns in shell scripts:" >> $GITHUB_STEP_SUMMARY
+            echo "$DANGEROUS" >> $GITHUB_STEP_SUMMARY
+            echo "::warning::Dangerous shell patterns detected"
+          else
+            echo "✅ No common dangerous shell patterns detected" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # ─── Semgrep ───
+  semgrep:
+    name: Semgrep Security Scan
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
+    steps:
+      - uses: actions/checkout@v4
+      - run: semgrep scan --config=auto --error 2>&1 | tee semgrep.log || true
+      - name: Upload results
+        run: |
+          echo "## Semgrep Results" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat semgrep.log >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,54 @@
+# CodeQL configuration for multi-language repos
+# Place at .github/codeql/codeql-config.yml
+
+name: "CodeQL Config"
+
+queries:
+  - uses: security-extended
+  - uses: security-and-quality
+
+paths-ignore:
+  - "tests/**"
+  - "test/**"
+  - "**/*_test.*"
+  - "**/test_*.*"
+  - "docs/**"
+  - "examples/**"
+  - "vendor/**"
+  - "third_party/**"
+  - "**/migrations/**"
+  - "**/generated/**"
+  - "*.min.js"
+  - "*.min.css"
+
+paths:
+  - "src/**"
+  - "lib/**"
+  - "core/**"
+  - "*.py"
+  - "*.rs"
+  - "*.ts"
+  - "*.js"
+  - "*.tsx"
+  - "*.go"
+  - "*.java"
+  - "*.c"
+  - "*.cpp"
+  - "*.h"
+  - "*.hpp"
+
+# Language-specific settings
+language:
+  python:
+    paths-ignore:
+      - "**/venv/**"
+      - "**/.venv/**"
+      - "**/site-packages/**"
+  javascript:
+    paths-ignore:
+      - "**/node_modules/**"
+      - "**/dist/**"
+      - "**/build/**"
+  rust:
+    paths-ignore:
+      - "**/target/**"

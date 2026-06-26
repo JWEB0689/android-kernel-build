@@ -1,0 +1,53 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & Release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup toolchain
+        uses: ./.github/actions/setup-toolchain
+        # For Rust: uses: dtolnay/rust-toolchain@stable
+        # For Python: uses: actions/setup-python@v5 with python-version: "3.11"
+        # For Node: uses: actions/setup-node@v4 with node-version: "22"
+
+      - name: Build release
+        run: |
+          # Replace with project-specific build command
+          # Rust: cargo build --release
+          # Python: python -m build
+          # Node: npm run build
+          echo "Build command not configured"
+
+      - name: Package artifacts
+        run: |
+          # Create release archive
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p release
+          # Copy binaries/artifacts to release/
+          # Example: cp target/release/myapp release/myapp-${VERSION}-${{ runner.os }}
+          echo "Packaging not configured"
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

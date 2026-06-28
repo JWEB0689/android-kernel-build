@@ -17,7 +17,7 @@ jobs:
   # ─── Shellcheck ───
   shellcheck:
     name: shellcheck
-    runs-on: ubuntu-latest
+    runs-on: tenki-standard-medium-4c-8g
     steps:
       - uses: actions/checkout@v4
       - name: Install shellcheck
@@ -33,7 +33,7 @@ jobs:
   # ─── Python Lint & Test ───
   python-lint:
     name: Python lint (scripts)
-    runs-on: ubuntu-latest
+    runs-on: tenki-standard-medium-4c-8g
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -62,7 +62,7 @@ jobs:
   # ─── Security Scan ───
   security:
     name: Security Scan
-    runs-on: ubuntu-latest
+    runs-on: tenki-standard-medium-4c-8g
     steps:
       - uses: actions/checkout@v4
         with:
@@ -82,7 +82,7 @@ jobs:
   # ─── Semgrep ───
   semgrep:
     name: Semgrep Security Scan
-    runs-on: ubuntu-latest
+    runs-on: tenki-standard-medium-4c-8g
     container:
       image: semgrep/semgrep
     steps:

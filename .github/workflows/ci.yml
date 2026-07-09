@@ -19,7 +19,7 @@ jobs:
     name: shellcheck
     runs-on: tenki-standard-medium-4c-8g
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install shellcheck
         run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
       - name: Run shellcheck
@@ -35,7 +35,7 @@ jobs:
     name: Python lint (scripts)
     runs-on: tenki-standard-medium-4c-8g
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -64,7 +64,7 @@ jobs:
     name: Security Scan
     runs-on: tenki-standard-medium-4c-8g
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Check for dangerous patterns in shell scripts
@@ -86,7 +86,7 @@ jobs:
     container:
       image: semgrep/semgrep
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: semgrep scan --config=auto --error 2>&1 | tee semgrep.log || true
       - name: Upload results
         run: |

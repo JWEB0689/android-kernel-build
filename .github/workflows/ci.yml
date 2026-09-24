@@ -17,7 +17,7 @@ jobs:
   # ─── Shellcheck ───
   shellcheck:
     name: shellcheck
-    runs-on: tenki-standard-medium-4c-8g
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Install shellcheck

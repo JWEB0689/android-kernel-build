@@ -55,7 +55,7 @@ env:
 jobs:
   build:
     name: Build kernel
-    runs-on: tenki-standard-medium-4c-8g
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout kernel source
